@@ -1,0 +1,24 @@
+id = "xzedx.derby"
+name = "Derby"
+version = "0.1.0"
+min_herdr_version = "0.9.1"
+description = "Send one prompt to every coding agent in the current Herdr tab and watch them race: a popup to type in, live timers and finishing ranks on the pane borders."
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+
+# Opens the broadcast popup on the current tab, sized to its agent count.
+[[actions]]
+id = "broadcast"
+title = "Derby: broadcast a prompt to this tab's agents"
+contexts = ["workspace", "global"]
+command = ["./target/release/herdr-derby", "--open"]
+
+[[panes]]
+id = "broadcast"
+title = "Derby"
+placement = "popup"
+width = 76
+height = 16
+command = ["./target/release/herdr-derby"]
