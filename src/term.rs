@@ -195,6 +195,9 @@ fn decode<S: ByteSource>(src: &mut S, b: u8) -> Key {
         0x15 => Key::CtrlU,
         0x01 => Key::CtrlA,
         0x0c => Key::CtrlL,
+        // Ctrl+N / Ctrl+P move like the arrows everywhere.
+        0x0e => Key::Down,
+        0x10 => Key::Up,
         0x05 => Key::End,
         b if b < 0x20 => Key::Unknown,
         b if b < 0x80 => Key::Char(b as char),
@@ -369,6 +372,7 @@ mod tests {
         assert_eq!(keys(b"\x1b"), vec![Key::Esc]);
         assert_eq!(keys(b"\x1b[Z"), vec![Key::BackTab]);
         assert_eq!(keys(b"\x01\x0c"), vec![Key::CtrlA, Key::CtrlL]);
+        assert_eq!(keys(b"\x0e\x10"), vec![Key::Down, Key::Up]);
     }
 
     #[test]

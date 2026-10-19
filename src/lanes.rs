@@ -78,6 +78,20 @@ pub struct KindCount {
     /// Start this kind with its skip-the-approvals flag.
     #[serde(default)]
     pub yolo: bool,
+    /// `--model` for these lanes; None is the agent's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl KindCount {
+    pub fn new(kind: &str) -> Self {
+        KindCount {
+            kind: kind.into(),
+            count: 0,
+            yolo: false,
+            model: None,
+        }
+    }
 }
 
 /// The flags that start `kind` without approval prompts, if it has them.
@@ -118,13 +132,18 @@ impl RaceConfig {
         }
     }
 
-    /// What was remembered for `kind`: nothing means no lanes, no yolo.
-    pub fn kind(&self, kind: &str) -> KindCount {
-        self.counts.iter().find(|c| c.kind == kind).cloned().unwrap_or(KindCount {
-            kind: kind.into(),
-            count: 0,
-            yolo: false,
-        })
+    /// The popup's rows for the startable `kinds`: the remembered rows of
+    /// each kind (one per model), or one empty row on its default model.
+    pub fn rows(&self, kinds: &[String]) -> Vec<KindCount> {
+        let mut rows = Vec::new();
+        for kind in kinds {
+            let before = rows.len();
+            rows.extend(self.counts.iter().filter(|c| &c.kind == kind).cloned());
+            if rows.len() == before {
+                rows.push(KindCount::new(kind));
+            }
+        }
+        rows
     }
 }
 
@@ -246,7 +265,7 @@ pub fn run_id() -> String {
 pub fn unique_name(kind: &str, taken: &[String]) -> String {
     let mut base: String = kind
         .chars()
-        .map(|c| c.to_ascii_lowercase())
+        .map(|c| if c == '.' || c == '/' { '-' } else { c.to_ascii_lowercase() })
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     if !base.starts_with(|c: char| c.is_ascii_lowercase()) {
@@ -257,6 +276,23 @@ pub fn unique_name(kind: &str, taken: &[String]) -> String {
         .map(|n| format!("{base}-{n}"))
         .find(|n| !taken.contains(n))
         .unwrap()
+}
+
+/// What a lane's name starts with: the kind, then the model when one is
+/// picked, without its provider ("kimi-code/k3" -> "kimi-k3", "kimi-code/
+/// kimi-for-coding" -> "kimi-for-coding").
+pub fn lane_base(kind: &str, model: Option<&str>) -> String {
+    match model {
+        None => kind.to_string(),
+        Some(m) => {
+            let short = m.rsplit('/').next().unwrap_or(m).to_ascii_lowercase();
+            if short.starts_with(kind) {
+                short
+            } else {
+                format!("{kind}-{short}")
+            }
+        }
+    }
 }
 
 /// Where a lane's worktree goes: next to the ones `herdr worktree create`
@@ -279,7 +315,7 @@ pub fn plan_lanes(
     let mut lanes = Vec::new();
     for kc in counts {
         for _ in 0..kc.count {
-            let name = unique_name(&kc.kind, &taken);
+            let name = unique_name(&lane_base(&kc.kind, kc.model.as_deref()), &taken);
             taken.push(name.clone());
             let (branch, worktree) = match (isolation, repo) {
                 (Isolation::Worktree, Some(r)) => {
@@ -289,10 +325,13 @@ pub fn plan_lanes(
                 }
                 _ => (None, None),
             };
-            let args = match yolo_args(&kc.kind) {
-                Some(a) if kc.yolo => a.iter().map(|s| s.to_string()).collect(),
-                _ => Vec::new(),
-            };
+            let mut args = Vec::new();
+            if let Some(m) = &kc.model {
+                args.extend(["--model".to_string(), m.clone()]);
+            }
+            if let (Some(a), true) = (yolo_args(&kc.kind), kc.yolo) {
+                args.extend(a.iter().map(|s| s.to_string()));
+            }
             lanes.push(Lane {
                 name,
                 kind: kc.kind.clone(),
@@ -376,6 +415,7 @@ mod tests {
             kind: kind.into(),
             count,
             yolo: false,
+            model: None,
         }
     }
 
@@ -428,6 +468,36 @@ mod tests {
         assert_eq!(lanes[0].args, vec!["--dangerously-skip-permissions"]);
         assert!(lanes[1].args.is_empty());
         assert!(lanes[2].args.is_empty());
+    }
+
+    #[test]
+    fn model_lanes_are_named_after_it() {
+        let mut opus = kc("claude", 2);
+        opus.model = Some("opus".into());
+        opus.yolo = true;
+        let mut k3 = kc("kimi", 1);
+        k3.model = Some("kimi-code/k3".into());
+        let mut gpt = kc("codex", 1);
+        gpt.model = Some("gpt-6.1-sol".into());
+        let lanes = plan_lanes(&[opus, kc("claude", 1), k3, gpt], "x", &[], None, Isolation::Shared, "/h");
+        let names: Vec<_> = lanes.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, vec!["claude-opus-1", "claude-opus-2", "claude-1", "kimi-k3-1", "codex-gpt-6-1-sol-1"]);
+        assert_eq!(lanes[0].args, vec!["--model", "opus", "--dangerously-skip-permissions"]);
+        assert!(lanes[2].args.is_empty());
+        assert_eq!(lanes[3].args, vec!["--model", "kimi-code/k3"]);
+        assert_eq!(lane_base("kimi", Some("kimi-code/kimi-for-coding")), "kimi-for-coding");
+    }
+
+    #[test]
+    fn rows_keep_one_per_model() {
+        let mut opus = kc("claude", 1);
+        opus.model = Some("opus".into());
+        let cfg = RaceConfig {
+            counts: vec![opus.clone(), kc("claude", 1), kc("codex", 2)],
+            ..RaceConfig::default()
+        };
+        let rows = cfg.rows(&["pi".into(), "claude".into(), "codex".into()]);
+        assert_eq!(rows, vec![kc("pi", 0), opus, kc("claude", 1), kc("codex", 2)]);
     }
 
     #[test]

@@ -58,8 +58,8 @@ timers and ranks are pane border titles. No separate window, and it works over
 
 ## Race mode
 
-Press the race key, type the prompt, Tab to the list below it, set how many of
-each agent to start, pick isolation and layout, press Enter.
+Press the race key, type the prompt, Tab to the list below it, pick the
+models and how many of each to start, pick isolation and layout, press Enter.
 
 ```
  Derby  race 3 fresh agents · worktree per agent · split this tab
@@ -67,16 +67,30 @@ each agent to start, pick isolation and layout, press Enter.
  › Make the importer stream instead of
    loading the whole file.
 ──────────────────────────────────────────────
-   claude       ×2  yolo
-   codex        ×1
-   kimi         ·
+   pi         default                        ·
+ ▾ claude                                    ×2  yolo
+     opus                                    ×1  yolo
+     sonnet                                  ×1  yolo
+   codex      default                        ×1
+ ▸ kimi       k3, kimi-for-coding            ·
  isolation    ‹ worktree per agent ›
  layout       ‹ split this tab ›
 ──────────────────────────────────────────────
- ←→ count · y yolo · ^a all · ^l none · ↑↓ move · tab prompt
+ ←→ close/open · m models · y yolo · 0 none · ^a all · ^l none
 ```
 
 - **Agents**: the Herdr integrations that are installed and on PATH.
+- **Models**: `m` opens a picker for that agent's models, the ones it uses
+  now already checked. Type to filter, Space to check several, Enter to make
+  the checked ones its models: one line each under the agent, each with its
+  own count and yolo; unchecked ones are removed. A name nobody listed can be
+  typed and used as is. `default` passes no `--model`. The lists come from
+  the agents themselves, read in the background each time the popup opens
+  and cached for the next: `codex debug models`, `kimi provider list`,
+  `omp models`, `pi --list-models`; claude offers its aliases (opus, sonnet,
+  haiku, fable), which always mean the latest model. Models raced before are
+  offered first. Lanes are named after their model (`claude-opus-1`,
+  `kimi-k3-1`), and so are their branches.
 - **yolo**: start that agent without approval prompts: claude
   `--dangerously-skip-permissions`, codex `--yolo`, kimi `--auto`, omp
   `--auto-approve`, gemini and qwen `--yolo`, copilot `--allow-all-tools`.
@@ -231,12 +245,28 @@ Race popup, below the prompt:
 | Key | Action |
 | --- | --- |
 | ↑ ↓ / j k | move |
-| → + Space / ← - | one more / one less of that agent; change isolation or layout |
-| 0 | none of that agent |
-| y | yolo on / off for that agent |
-| Ctrl+A / Ctrl+L | one of every agent not picked yet / none at all |
+| → + Space / ← - | one more / one less of that model; change isolation or layout |
+| → / ← on an agent with several models | open / close its models (Space toggles) |
+| 0 | none of that model (on an agent: of all its models) |
+| y | yolo on / off for that model (on an agent: all its models) |
+| m | pick the agent's models |
+| d | remove that model from its agent |
+| Ctrl+A / Ctrl+L | one of every model not picked yet / none at all |
 | Tab, Esc | back to the prompt |
 | Enter | start |
+
+Model picker:
+
+| Key | Action |
+| --- | --- |
+| typing | filter; a name not listed can be used as typed |
+| ↑ ↓ | move |
+| Space | check / uncheck |
+| Ctrl+U | clear the filter |
+| Enter | use the checked models (none checked: the highlighted one) |
+| Esc | back, unchanged |
+
+Ctrl+N / Ctrl+P work as ↓ / ↑ everywhere.
 
 While agents start:
 

@@ -29,6 +29,7 @@ mod editor;
 mod git;
 mod lanes;
 mod model;
+mod models;
 mod race;
 mod race_ui;
 mod rpc;
@@ -359,8 +360,12 @@ fn open_race(args: &[String]) -> Result<(), String> {
     let client = Client::connect()?;
     let tab = current_tab(args)?;
     let anchor = model::anchor_pane(&client, &tab, context_str("pane_id").as_deref())?;
-    let kinds = model::agent_kinds(&client)?.len();
-    let height = (EDITOR_ROWS + race_ui::chrome_rows(kinds) + 2).min(40);
+    let kinds = model::agent_kinds(&client)?;
+    // The agent lines as the popup will show them, and two spare for models
+    // added there.
+    let app = race_ui::RaceApp::new(kinds, &lanes::RaceConfig::load(), true);
+    let lines = app.lines().len() - 2 + 2;
+    let height = (EDITOR_ROWS + race_ui::chrome_rows(lines) + 2).min(40);
     client
         .call(
             "plugin.pane.open",
@@ -383,11 +388,10 @@ fn run_race_popup(args: &[String]) -> Result<(), String> {
     let anchor = model::anchor_pane(&client, &tab, env_nonempty("DERBY_PANE").as_deref())?;
     let cwd = anchor.dir().ok_or("the pane has no cwd")?.to_string();
     let repo = git::repo(&cwd);
-    let mut app = race_ui::RaceApp::new(
-        model::agent_kinds(&client)?,
-        &lanes::RaceConfig::load(),
-        repo.is_some(),
-    );
+    let kinds = model::agent_kinds(&client)?;
+    let mut app = race_ui::RaceApp::new(kinds.clone(), &lanes::RaceConfig::load(), repo.is_some());
+    app.catalog = models::load(&kinds);
+    app.recent = models::load_recent();
     if let Some(t) = env_nonempty("DERBY_TEST_TEXT") {
         app.editor.set(&t);
     }
@@ -397,6 +401,7 @@ fn run_race_popup(args: &[String]) -> Result<(), String> {
     let mut input = term::Stdin::new(&std::env::var("DERBY_TEST_INPUT").unwrap_or_default());
     let outcome = loop {
         let (cols, rows) = term::size();
+        app.room = race_ui::room(rows);
         let (lines, cursor) = race_ui::render(&app, cols, rows);
         term::draw(&lines, cursor);
         if term::INTERRUPTED.load(Ordering::SeqCst) {
@@ -415,6 +420,8 @@ fn run_race_popup(args: &[String]) -> Result<(), String> {
             let text = app.editor.text().trim_end().to_string();
             state::save_last_prompt(&text);
             app.config().save();
+            app.remember_models();
+            models::save_recent(&app.recent);
             let taken: Vec<String> = model::list_agents(&client)?
                 .into_iter()
                 .filter_map(|a| a.name)
