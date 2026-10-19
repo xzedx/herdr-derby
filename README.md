@@ -1,22 +1,21 @@
+<p align="center"><img src="docs/logo.png" width="160" alt="herdr-derby"></p>
+
 # herdr-derby
 
-Send one prompt to every coding agent in the current [Herdr](https://herdr.dev)
-tab and watch them race.
+English | [简体中文](README.zh-CN.md)
 
-Press a key, type (or paste) a prompt, press Enter. Every agent in the tab gets
-the same message at the same moment. While they work, each pane border shows a
-live timer (`🏇 12.4s · claude`); when they settle it shows the finishing rank
-(`🥇 2.9s · codex`, `🥈 4.0s · claude`), and one notification sums up the
-race.
+A [Herdr](https://herdr.dev) plugin that races coding agents on the same prompt.
 
-Race mode goes one step further: it starts fresh agents of the kinds you pick
-(the same kind more than once if you like), each in its own git worktree, gives
-them the same prompt, and when they are done lets you compare their work, keep
-the one you want and remove the rest.
+- **Broadcast**: one prompt to every agent in the current tab. Pane borders
+  show a live timer (`🏇 12.4s · claude`), then the finishing rank
+  (`🥇 2.9s · codex`).
+- **Race**: start fresh agents, any mix of kinds and models, each in its own
+  git worktree. Give them the prompt, keep the best result, remove the rest.
 
-Everything is drawn by Herdr: the prompt box is a Herdr terminal popup, the
-timers and ranks are pane border titles. No separate window, and it works over
-`herdr --remote` / SSH.
+It all runs inside Herdr (a popup and pane borders), so it works over
+`herdr --remote` and SSH too.
+
+## Broadcast
 
 ```
  Derby  broadcast to 4 of 4 agents in this tab
@@ -32,34 +31,20 @@ timers and ranks are pane border titles. No separate window, and it works over
  enter send · alt+enter newline · tab targets · esc cancel
 ```
 
-## How it works
+- Idle and finished agents start checked. Working agents start unchecked, so
+  they don't get a prompt mid-turn. Agents waiting on you can't be picked.
+- Prompts go through Herdr's `agent.prompt`, so multi-line and CJK text
+  arrives as one message.
+- Finishing is read from Herdr's own agent state. No marker files or wrapper
+  scripts.
+- An agent that stops for an approval or a question shows `⚠ needs you`. Time
+  spent waiting on you isn't counted: `🥈 3m32s (+1m10s waiting)`.
+- `✗ not sent` means the agent never got the prompt; `✗ failed` means it got
+  it and something went wrong. A prompt is never delivered twice.
 
-- Targets are the agents Herdr recognizes in the tab (`agent.list`). Idle and
-  done agents start checked. A working agent starts unchecked: it would take
-  the prompt mid-turn. An agent waiting on an approval or question is shown
-  but cannot be selected; Herdr would refuse the prompt.
-- Delivery uses Herdr's own `agent.prompt`, which respects each pane's
-  bracketed-paste mode, so multi-line and CJK prompts arrive as one message.
-- Finish detection is Herdr's native agent state. Agents do not have to
-  cooperate (no marker files, no wrapper scripts).
-- Enter hands the race to a small detached helper, so the popup closes at once.
-  The helper submits to all targets in parallel, keeps the border timers
-  ticking, ranks the finishers and shows the notification.
-- An agent that stops on an approval or question mid-race is not done: its
-  border says `⚠ needs you · 33.5s`, one notification tells you, and the race
-  follows it again once you answer. **Time spent waiting on you does not
-  count**: ranks go by each agent's own working time, and the wait is shown
-  next to it (`🥈 3m32s (+1m10s waiting)`).
-- A prompt the agent never took is told apart from a run that went wrong:
-  `✗ not sent` versus `✗ failed: <reason>`. If Herdr sees no activity after
-  sending (`agent_prompt_stalled`), Derby reads the screen: only when the
-  agent is idle and nothing of the prompt shows does it send once more;
-  otherwise it marks the agent failed rather than risk sending it twice.
+## Race
 
-## Race mode
-
-Press the race key, type the prompt, Tab to the list below it, pick the
-models and how many of each to start, pick isolation and layout, press Enter.
+![Starting a race of seven agents, each in its own worktree](docs/start-race.gif)
 
 ```
  Derby  race 3 fresh agents · worktree per agent · split this tab
@@ -79,55 +64,34 @@ models and how many of each to start, pick isolation and layout, press Enter.
  ←→ close/open · m models · y yolo · 0 none · ^a all · ^l none
 ```
 
-- **Agents**: the Herdr integrations that are installed and on PATH.
-- **Models**: `m` opens a picker for that agent's models, the ones it uses
-  now already checked. Type to filter, Space to check several, Enter to make
-  the checked ones its models: one line each under the agent, each with its
-  own count and yolo; unchecked ones are removed. A name nobody listed can be
-  typed and used as is. `default` passes no `--model`. The lists come from
-  the agents themselves, read in the background each time the popup opens
-  and cached for the next: `codex debug models`, `kimi provider list`,
-  `omp models`, `pi --list-models`; claude offers its aliases (opus, sonnet,
-  haiku, fable), which always mean the latest model. Models raced before are
-  offered first. Lanes are named after their model (`claude-opus-1`,
-  `kimi-k3-1`), and so are their branches.
-- **yolo**: start that agent without approval prompts: claude
-  `--dangerously-skip-permissions`, codex `--yolo`, kimi `--auto`, omp
-  `--auto-approve`, gemini and qwen `--yolo`, copilot `--allow-all-tools`.
-  Agents without such a flag (pi) start as usual.
-- **Isolation**: one git worktree per agent, on a branch
-  `race/<run-id>/<agent>` from the current HEAD, or every agent in the shared
-  cwd. Outside a git repo it is always the shared cwd.
-- **Layout**: split the current tab, one tab per agent, or one workspace per
-  agent. Worktrees are made with `git worktree add` and live next to the ones
-  `herdr worktree create` makes, in `~/.herdr/worktrees/<repo>/`. Started from
-  the repo's main workspace, workspace lanes open under it in the sidebar
-  (`worktree.open`); started anywhere else they are plain workspaces, so a
-  race never leaves an extra main workspace behind.
-- The popup stays open while the agents start and only hands the prompt over
-  once every agent is ready: idle, taking input, and its screen holding still
-  (codex reports `working` for a while after starting; claude and kimi read
-  idle while a dialog or redraw is still up). Each agent gets 60 s; one that
-  is not ready by then shows `not ready after 60s` with the last thing on its
-  screen. One that needs signing in, or exits, says so instead of spinning.
-- `↑↓` picks an agent and `x` removes it (pane, worktree and branch) while the
-  others carry on. Enter races the ready ones and removes the rest. Esc
-  removes everything created so far. Anything cleanup could not remove is
-  named in a notification.
-- **Folder trust**: a worktree of a repo you already trust in claude or codex
-  is trusted too, so usually nothing asks. kimi trusts each folder on its own
-  and asks in every new worktree. If an agent stops at its folder-trust
-  dialog, the popup says so: `y` answers it (Derby moves the highlight to the
-  trust option, checks the screen shows it highlighted, then presses Enter;
-  Claude highlights "No, exit" by default), `n` drops those agents. Any other
-  dialog is left for you; `r` looks again once you answered it.
-- The last choice of agents, isolation and layout is remembered.
+- **Agents**: Herdr integrations that are installed and on PATH.
+- **Models** (`m`): a filterable picker where you can check several models.
+  Each checked model gets its own line, with its own count and yolo setting.
+  The lists come from the agents themselves (`codex debug models`,
+  `kimi provider list`, `omp models`, `pi --list-models`, plus claude's
+  aliases), re-read every time and cached. You can type a name that isn't
+  listed. `default` passes no `--model`.
+- **yolo** (`y`): skip approval prompts. Uses claude
+  `--dangerously-skip-permissions`, codex/gemini/qwen `--yolo`, kimi `--auto`,
+  omp `--auto-approve`, copilot `--allow-all-tools`.
+- **Isolation**: one worktree per agent, on branch `race/<id>/<agent>` from
+  HEAD, under `~/.herdr/worktrees/<repo>/`. Or every agent shares the cwd,
+  which is always the case outside git.
+- **Layout**: split this tab, one tab per agent, or one workspace per agent.
 
-From there it is the same race: border timers, ranks, one notification.
+The prompt goes out only once every agent is really ready (each gets 60 s).
+While they start:
+
+- If an agent stops at a folder-trust dialog, `y` trusts the folder and `n`
+  drops that agent.
+- `x` drops one lane.
+- Esc removes everything created so far.
+
+Your last setup is remembered.
 
 ### Settle
 
-Finishing first is not winning. The settle popup lists the race's lanes:
+Finishing first isn't winning. Settle shows what each lane actually did:
 
 ```
  Derby  settle race 1019-143205 · 3 lanes · base a1b2c3d
@@ -140,59 +104,37 @@ Finishing first is not winning. The settle popup lists the race's lanes:
  ↑↓ move · space pick winners · d diff · f go to pane · enter review · D drop race · esc
 ```
 
-"changes" is each lane's work against the race's base: commits, edits and new
-files, uncommitted ones included (measured through a temporary index, the
-lane's own index is not touched). `d` shows the full diff in git's pager, `f`
-jumps to the lane's pane to read what the agent said. Nothing is picked until
-you pick, and you can keep more than one lane. Enter then shows what will be
-removed, with uncommitted work called out, and only `y` does it (Enter or any
-other key goes back): the other lanes' panes, tabs or workspaces are closed,
-their worktrees force-removed and their branches deleted. The winners' panes,
-worktrees and branches stay as they are. In a shared-cwd race only the other
-panes are closed and no files are touched. No merging: that part is yours.
+1. Pick one or more winners with Space. `d` shows a lane's diff and `f` jumps
+   to its pane.
+2. Enter shows what will be removed, with uncommitted work called out.
+3. `y` confirms. The losers' panes, worktrees and branches are removed; the
+   winners stay as they are.
 
-`D` drops the whole race instead: every lane is removed, after the same `y`
-confirmation.
+Derby doesn't merge anything; that part is yours. `D` drops the whole race.
 
-An unsettled race waits in the plugin state dir until you settle or drop it.
-With more than one waiting, settle opens on a list of them (id, age, lanes
-left, the prompt's first line); Enter opens one, `D` drops it, Esc in a race
-goes back to the list. With none, the popup says so.
+![Dropping a race: every lane's pane, worktree and branch removed](docs/drop-race.gif)
 
-Lanes you removed by hand are taken as they are:
-
-- worktree deleted, branch still there: "changes" shows what the branch
-  committed (`worktree gone · 2 files +18 −2 committed`), `d` shows that diff,
-  and the lane can still win; settling it as a loser deletes the branch.
-- worktree and branch both gone: shown as `gone`, cannot be picked, and only
-  its pane is closed if it is still open.
-- nothing left of any lane (no worktree, branch or pane): the race counts as
-  settled and is not listed any more.
+Races you haven't settled are kept until you settle or drop them. If several
+are open, settle starts with a list of them. Lanes you deleted by hand are
+handled too: a lane with only its branch left can still win, and a lane with
+nothing left is skipped.
 
 ## Requirements
 
-- Herdr 0.9.1 or newer, with the agent integrations you use installed
-  (`herdr integration install <agent>`). If an agent is not listed, check
-  `herdr status`: the running server may be older than the client.
-- A Rust toolchain (`cargo`); `herdr plugin install` runs
-  `cargo build --release`. Four small dependencies: serde, serde_json, libc,
-  unicode-width. No TUI framework.
-- `git` on PATH for race mode's worktrees.
+- Herdr 0.9.1+, with the agent integrations you use
+  (`herdr integration install <agent>`)
+- Rust (`cargo`): installing builds from source
+- `git` for worktrees
 
 ## Install
 
 ```bash
 herdr plugin install xzedx/herdr-derby
+# or from a checkout:
+cargo build --release && herdr plugin link "$PWD"
 ```
 
-or, for a local checkout:
-
-```bash
-cargo build --release
-herdr plugin link "$PWD"
-```
-
-Herdr plugins cannot ship default keybindings. Bind the action in
+Herdr plugins can't ship keybindings, so add them yourself in
 `~/.config/herdr/config.toml`:
 
 ```toml
@@ -217,99 +159,79 @@ description = "derby: settle or drop races"
 
 ## Keys
 
+Ctrl+N / Ctrl+P work as ↓ / ↑ everywhere.
+
 Prompt:
 
 | Key | Action |
 | --- | --- |
-| Enter | send |
-| Alt+Enter, Ctrl+J | new line (Shift+Enter too, if the terminal reports it) |
-| ↑ on an empty prompt | recall the last prompt |
+| Enter | send / start |
+| Alt+Enter, Ctrl+J | new line |
+| ↑ on an empty prompt | last prompt |
 | Ctrl+U | clear |
-| Tab | go to the target list |
+| Tab | to the list below |
 | Esc, Ctrl+C | cancel |
 
-Target list:
+Broadcast targets:
 
 | Key | Action |
 | --- | --- |
-| ↑ ↓ / j k | move |
-| Space, x | toggle |
-| 1-9 | toggle that agent |
+| Space, x / 1-9 | toggle |
 | a | toggle all |
-| Ctrl+A / Ctrl+L | select all / none |
-| Tab, Esc | back to the prompt |
-| Enter | send |
+| Ctrl+A / Ctrl+L | all / none |
 
-Race popup, below the prompt:
+Race list:
 
 | Key | Action |
 | --- | --- |
-| ↑ ↓ / j k | move |
-| → + Space / ← - | one more / one less of that model; change isolation or layout |
-| → / ← on an agent with several models | open / close its models (Space toggles) |
-| 0 | none of that model (on an agent: of all its models) |
-| y | yolo on / off for that model (on an agent: all its models) |
-| m | pick the agent's models |
-| d | remove that model from its agent |
-| Ctrl+A / Ctrl+L | one of every model not picked yet / none at all |
-| Tab, Esc | back to the prompt |
-| Enter | start |
+| → + / ← - | one more / one less; change isolation or layout |
+| → / ← on an agent with several models | open / close |
+| 0 | none of it |
+| y | yolo on / off |
+| m | pick models |
+| d | remove that model |
+| Ctrl+A / Ctrl+L | one of each / none |
 
 Model picker:
 
 | Key | Action |
 | --- | --- |
-| typing | filter; a name not listed can be used as typed |
-| ↑ ↓ | move |
-| Space | check / uncheck |
-| Ctrl+U | clear the filter |
-| Enter | use the checked models (none checked: the highlighted one) |
-| Esc | back, unchanged |
-
-Ctrl+N / Ctrl+P work as ↓ / ↑ everywhere.
+| type | filter, or a name to use as is |
+| Space | check |
+| Ctrl+U | clear filter |
+| Enter | use the checked ones (or the highlighted one) |
+| Esc | back |
 
 While agents start:
 
 | Key | Action |
 | --- | --- |
-| ↑ ↓ / j k | pick an agent |
-| x | remove that agent; the others carry on |
-| y / n | trust / remove the agents at their folder-trust dialog |
-| r | look again at agents that needed you or ran out of time |
-| Enter | race the ready ones, remove the rest |
+| x | drop that agent |
+| y / n | trust / drop agents at a folder-trust dialog |
+| r | check again |
+| Enter | race the ready ones |
 | Esc | stop and remove everything |
 
 Settle:
 
 | Key | Action |
 | --- | --- |
-| ↑ ↓ / j k | move |
-| Space, x / 1-9 | pick or unpick a winner (more than one is fine) |
-| d | full diff of the lane |
-| f | go to the lane's pane |
-| Enter | review what will be removed |
-| D | drop the race: review removing every lane |
-| y | on the review: settle or drop (nothing else does) |
-| Esc, q | back to the race list, or close |
-
-Settle, with more than one open race:
-
-| Key | Action |
-| --- | --- |
-| ↑ ↓ / j k | move |
-| Enter | open the race |
-| D | drop the race (asks for `y`) |
-| Esc, q | close |
+| Space, x / 1-9 | pick a winner |
+| d / f | diff / go to pane |
+| Enter | review |
+| D | drop the race |
+| y | confirm |
+| Esc, q | back / close |
 
 ## Command line
 
 ```bash
-herdr-derby --send [--tab w1:t1] "prompt"   # race without the popup, print the result
-herdr-derby --dump [--tab w1:t1]            # render one popup frame to stdout
+herdr-derby --send [--tab w1:t1] "prompt"   # race without the popup
+herdr-derby --dump [--tab w1:t1]            # print one popup frame
 ```
 
-`DERBY_TRACE=<file>` appends timing traces; `DERBY_TEST_INPUT=<bytes>` feeds
-key bytes to the popup before the terminal (testing).
+`DERBY_TRACE=<file>` logs timings. `DERBY_TEST_INPUT=<bytes>` feeds keys to
+the popup, for tests.
 
 ## License
 
