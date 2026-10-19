@@ -65,6 +65,10 @@ pub fn branch_delete(repo: &Repo, branch: &str) -> Result<(), String> {
     }
 }
 
+pub fn branch_exists(repo: &Repo, branch: &str) -> bool {
+    git(&repo.root, &["rev-parse", "--verify", "-q", &format!("refs/heads/{branch}")]).is_ok()
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stat {
     pub files: usize,
@@ -169,6 +173,19 @@ pub fn show_diff(dir: &str, base: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// What a lane committed on its branch, for a lane whose worktree is gone.
+pub fn branch_stat(repo: &Repo, branch: &str) -> Result<Stat, String> {
+    git(&repo.root, &["diff", "--numstat", &repo.base, branch]).map(|out| parse_numstat(&out))
+}
+
+pub fn show_branch_diff(repo: &Repo, branch: &str) -> Result<(), String> {
+    Command::new("git")
+        .args(["-C", &repo.root, "-p", "diff", &repo.base, branch])
+        .status()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,8 +244,14 @@ mod tests {
         // n.txt is still untracked in the real index.
         let status = git(&wt, &["status", "--porcelain"]).unwrap();
         assert!(status.contains("?? n.txt"), "{status}");
+        // Deleted by hand: the branch still tells what was committed.
+        std::fs::remove_dir_all(&wt).unwrap();
+        assert!(branch_exists(&r, "race/t/claude-1"));
+        let s = branch_stat(&r, "race/t/claude-1").unwrap();
+        assert_eq!(s, Stat { files: 1, added: 1, removed: 0 });
         worktree_remove(&r, &wt).unwrap();
         branch_delete(&r, "race/t/claude-1").unwrap();
+        assert!(!branch_exists(&r, "race/t/claude-1"));
         assert!(!Path::new(&wt).exists());
         assert!(git(d, &["branch", "--list", "race/*"]).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);

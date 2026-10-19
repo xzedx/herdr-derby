@@ -30,10 +30,10 @@ title = "Derby: race fresh agents on one prompt"
 contexts = ["workspace", "global"]
 command = ["./target/release/herdr-derby", "--open-race"]
 
-# Keep the winning lane of the latest race, remove the others.
+# Keep the winning lanes of a race and remove the others, or drop a race.
 [[actions]]
 id = "settle"
-title = "Derby: settle the latest race"
+title = "Derby: settle races"
 contexts = ["workspace", "global"]
 command = ["./target/release/herdr-derby", "--open-settle"]
 

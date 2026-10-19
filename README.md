@@ -109,31 +109,47 @@ From there it is the same race: border timers, ranks, one notification.
 
 ### Settle
 
-Finishing first is not winning. The settle popup lists the latest race:
+Finishing first is not winning. The settle popup lists the race's lanes:
 
 ```
  Derby  settle race 1019-143205 · 3 lanes · base a1b2c3d
 ──────────────────────────────────────────────────────────────────
      lane         finish           changes              branch
- ( ) claude-1     🥈 4m12s         5 files +120 −34     race/1019-143205/claude-1
- ( ) codex-1      🥇 2m55s         2 files +18 −2       race/1019-143205/codex-1
- ( ) claude-2     ⚠ needs you      no changes           race/1019-143205/claude-2
+ [ ] claude-1     🥈 4m12s         5 files +120 −34     race/1019-143205/claude-1
+ [•] codex-1      🥇 2m55s         2 files +18 −2       race/1019-143205/codex-1
+ [ ] claude-2     ⚠ needs you      no changes           race/1019-143205/claude-2
 ──────────────────────────────────────────────────────────────────
- ↑↓ move · space pick winner · d diff · f go to pane · enter review · esc
+ ↑↓ move · space pick winners · d diff · f go to pane · enter review · D drop race · esc
 ```
 
 "changes" is each lane's work against the race's base: commits, edits and new
 files, uncommitted ones included (measured through a temporary index, the
 lane's own index is not touched). `d` shows the full diff in git's pager, `f`
 jumps to the lane's pane to read what the agent said. Nothing is picked until
-you pick; Enter then shows what will be removed, with uncommitted work called
-out, and only `y` does it (Enter or any other key goes back): the other
-lanes' panes, tabs or workspaces are closed, their worktrees force-removed and
-their branches deleted. The winner's pane,
-worktree and branch stay as they are. In a shared-cwd race only the other panes
-are closed and no files are touched. No merging: that part is yours.
+you pick, and you can keep more than one lane. Enter then shows what will be
+removed, with uncommitted work called out, and only `y` does it (Enter or any
+other key goes back): the other lanes' panes, tabs or workspaces are closed,
+their worktrees force-removed and their branches deleted. The winners' panes,
+worktrees and branches stay as they are. In a shared-cwd race only the other
+panes are closed and no files are touched. No merging: that part is yours.
 
-An unsettled race waits in the plugin state dir until you settle it.
+`D` drops the whole race instead: every lane is removed, after the same `y`
+confirmation.
+
+An unsettled race waits in the plugin state dir until you settle or drop it.
+With more than one waiting, settle opens on a list of them (id, age, lanes
+left, the prompt's first line); Enter opens one, `D` drops it, Esc in a race
+goes back to the list. With none, the popup says so.
+
+Lanes you removed by hand are taken as they are:
+
+- worktree deleted, branch still there: "changes" shows what the branch
+  committed (`worktree gone · 2 files +18 −2 committed`), `d` shows that diff,
+  and the lane can still win; settling it as a loser deletes the branch.
+- worktree and branch both gone: shown as `gone`, cannot be picked, and only
+  its pane is closed if it is still open.
+- nothing left of any lane (no worktree, branch or pane): the race counts as
+  settled and is not listed any more.
 
 ## Requirements
 
@@ -178,7 +194,7 @@ description = "derby: race fresh agents"
 key = "prefix+ctrl+s"
 type = "plugin_action"
 command = "xzedx.derby.settle"
-description = "derby: settle the latest race"
+description = "derby: settle or drop races"
 ```
 
 ## Keys
@@ -231,11 +247,21 @@ Settle:
 | Key | Action |
 | --- | --- |
 | ↑ ↓ / j k | move |
-| Space, x / 1-9 | pick the winner |
+| Space, x / 1-9 | pick or unpick a winner (more than one is fine) |
 | d | full diff of the lane |
 | f | go to the lane's pane |
 | Enter | review what will be removed |
-| y | on the review: settle (nothing else does) |
+| D | drop the race: review removing every lane |
+| y | on the review: settle or drop (nothing else does) |
+| Esc, q | back to the race list, or close |
+
+Settle, with more than one open race:
+
+| Key | Action |
+| --- | --- |
+| ↑ ↓ / j k | move |
+| Enter | open the race |
+| D | drop the race (asks for `y`) |
 | Esc, q | close |
 
 ## Command line

@@ -158,6 +158,9 @@ pub struct Record {
     pub lanes: Vec<Lane>,
     #[serde(default)]
     pub settled: bool,
+    /// What the agents were asked, to tell races apart in settle.
+    #[serde(default)]
+    pub prompt: String,
 }
 
 fn races_dir() -> std::path::PathBuf {
@@ -179,15 +182,19 @@ impl Record {
             .and_then(|s| serde_json::from_str(&s).ok())
     }
 
-    /// The most recent race that has not been settled yet.
-    pub fn latest_open() -> Option<Record> {
-        let entries = std::fs::read_dir(races_dir()).ok()?;
-        entries
+    /// Races not settled yet, newest first.
+    pub fn open() -> Vec<Record> {
+        let Ok(entries) = std::fs::read_dir(races_dir()) else {
+            return Vec::new();
+        };
+        let mut races: Vec<Record> = entries
             .flatten()
             .filter_map(|e| std::fs::read_to_string(e.path()).ok())
             .filter_map(|s| serde_json::from_str::<Record>(&s).ok())
             .filter(|r| !r.settled)
-            .max_by(|a, b| a.created.total_cmp(&b.created))
+            .collect();
+        races.sort_by(|a, b| b.created.total_cmp(&a.created));
+        races
     }
 
     pub fn worktrees(&self) -> bool {

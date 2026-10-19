@@ -16,7 +16,7 @@
 //!   herdr-derby --race-popup     race popup (manifest pane "race")
 //!   herdr-derby --open-race      open the race popup on the current tab
 //!   herdr-derby --settle-popup   settle popup (manifest pane "settle")
-//!   herdr-derby --open-settle    open the settle popup for the latest race
+//!   herdr-derby --open-settle    open the settle popup (race list when several are open)
 //!   herdr-derby --race <file>    run a race described by a run file (detached helper)
 //!   herdr-derby --send [--tab T] <text>
 //!                                race without the popup, in the foreground
@@ -427,6 +427,7 @@ fn run_race_popup(args: &[String]) -> Result<(), String> {
                 isolation,
                 layout: app.layout,
                 settled: false,
+                prompt: String::new(),
             };
             start_lanes(&client, record, anchor.pane_id, text, &mut input)
         }
@@ -527,6 +528,7 @@ fn start_lanes(
         r
     };
     record.lanes.retain(|l| l.pane_id.is_some());
+    record.prompt = text.clone();
     record.save()?;
     let targets = record
         .lanes
@@ -555,12 +557,7 @@ fn leftovers(client: &Client, errors: &[String]) {
 }
 
 fn open_settle() -> Result<(), String> {
-    let client = Client::connect()?;
-    if lanes::Record::latest_open().is_none() {
-        settle::notify(&client, "Derby: no race to settle", "start one with Derby race");
-        return Ok(());
-    }
-    client
+    Client::connect()?
         .call(
             "plugin.pane.open",
             json!({
@@ -574,19 +571,28 @@ fn open_settle() -> Result<(), String> {
         .map(|_| ())
 }
 
+/// One open race goes straight to its lanes; more start at the race list,
+/// none shows the empty list saying so.
 fn run_settle_popup() -> Result<(), String> {
-    use settle::Action;
+    use settle::{Action, ListAction};
     trace("settle:start");
     let client = Client::connect()?;
-    let record = lanes::Record::latest_open().ok_or("no race to settle")?;
-    let mut app = settle::SettleApp::load(&client, record);
+    let mut list = settle::RaceList::load(&client);
+    let mut view = if list.races.len() == 1 {
+        Some(settle::SettleApp::load(&client, list.races.remove(0), false))
+    } else {
+        None
+    };
     term::install_signal_handlers();
     let mut raw = term::RawMode::enable();
     term::enter_screen();
     let mut input = term::Stdin::new(&std::env::var("DERBY_TEST_INPUT").unwrap_or_default());
     loop {
         let (cols, rows) = term::size();
-        term::draw(&settle::render(&app, cols, rows), None);
+        match &view {
+            Some(app) => term::draw(&settle::render(app, cols, rows), None),
+            None => term::draw(&settle::render_races(&list, cols, rows), None),
+        }
         if term::INTERRUPTED.load(Ordering::SeqCst) {
             break;
         }
@@ -594,36 +600,74 @@ fn run_settle_popup() -> Result<(), String> {
             continue;
         };
         trace(&format!("settle:key:{key:?}"));
+        let Some(app) = view.as_mut() else {
+            match list.handle(key) {
+                Some(ListAction::Open(i)) => {
+                    view = Some(settle::SettleApp::load(&client, list.races.remove(i), true));
+                }
+                Some(ListAction::Drop(i)) => {
+                    let mut app = settle::SettleApp::load(&client, list.races.remove(i), true);
+                    app.handle(Key::Char('D'));
+                    view = Some(app);
+                }
+                Some(ListAction::Quit) => break,
+                None => {}
+            }
+            continue;
+        };
         match app.handle(key) {
             None => {}
             Some(Action::Diff(i)) => {
                 // Hand the terminal to git's pager, then measure again.
                 let lane = &app.record.lanes[i];
-                if let (Some(path), Some(repo)) = (&lane.worktree, &app.record.repo) {
+                let place = app.rows[i].presence.place;
+                if let Some(repo) = &app.record.repo {
                     term::leave_screen();
                     drop(raw.take());
-                    if let Err(e) = git::show_diff(path, &repo.base) {
+                    let shown = match (place, &lane.worktree, &lane.branch) {
+                        (settle::Place::Worktree, Some(path), _) => git::show_diff(path, &repo.base),
+                        (_, _, Some(branch)) => git::show_branch_diff(repo, branch),
+                        _ => Ok(()),
+                    };
+                    if let Err(e) = shown {
                         app.message = Some(e);
                     }
                     raw = term::RawMode::enable();
                     term::enter_screen();
-                    app.rows[i].stat = settle::lane_stat(&app.record, i);
+                    app.rows[i].stat = settle::lane_stat(&app.record, lane, place);
                 }
             }
             Some(Action::Focus(i)) => {
-                if let Some(pane) = &app.record.lanes[i].pane_id {
-                    let _ = client.call("pane.focus", json!({ "pane_id": pane }));
+                let focused = match &app.record.lanes[i].pane_id {
+                    Some(pane) => client.call("pane.focus", json!({ "pane_id": pane })).is_ok(),
+                    None => false,
+                };
+                if focused {
+                    break;
                 }
-                break;
+                app.message = Some(format!("{}'s pane is gone", app.record.lanes[i].name));
             }
             Some(Action::Settle) => {
                 let (cols, rows) = term::size();
-                app.message = Some("settling…".into());
-                term::draw(&settle::render(&app, cols, rows), None);
-                let (head, body) = settle::execute(&client, &mut app);
+                app.message = Some(if app.dropping { "dropping…" } else { "settling…" }.into());
+                term::draw(&settle::render(app, cols, rows), None);
+                let (head, body) = settle::execute(&client, app);
                 trace(&format!("settle:done {head}"));
                 settle::notify(&client, &head, &body);
-                break;
+                // More open races: back to the list to carry on.
+                list = settle::RaceList::load(&client);
+                if list.races.is_empty() {
+                    break;
+                }
+                list.message = Some(head);
+                view = None;
+            }
+            Some(Action::Back) => {
+                list = settle::RaceList::load(&client);
+                if list.races.is_empty() {
+                    break;
+                }
+                view = None;
             }
             Some(Action::Quit) => break,
         }
