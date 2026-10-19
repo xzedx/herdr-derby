@@ -2,8 +2,10 @@
 //! and the race record kept in the state dir until the race is settled.
 //!
 //! A lane is one fresh agent in its own pane, tab or workspace, optionally
-//! in its own git worktree. Everything here is plain data and planning, so
-//! it can be tested without Herdr or git.
+//! in its own git worktree. Most lanes race; a referee lane is started from
+//! settle to judge the racers or merge them, and never races itself.
+//! Everything here is plain data and planning, so it can be tested without
+//! Herdr or git.
 
 use crate::state;
 use serde::{Deserialize, Serialize};
@@ -118,17 +120,21 @@ pub struct RaceConfig {
     pub layout: Layout,
 }
 
+/// Where the race popup keeps its setup; referees keep theirs apart.
+pub const RACE_CONFIG: &str = "race-config.json";
+pub const REFEREE_CONFIG: &str = "referee-config.json";
+
 impl RaceConfig {
-    pub fn load() -> Self {
-        std::fs::read_to_string(state::state_dir().join("race-config.json"))
+    pub fn load(file: &str) -> Self {
+        std::fs::read_to_string(state::state_dir().join(file))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
     }
 
-    pub fn save(&self) {
+    pub fn save(&self, file: &str) {
         if let Ok(s) = serde_json::to_string(self) {
-            let _ = std::fs::write(state::state_dir().join("race-config.json"), s);
+            let _ = std::fs::write(state::state_dir().join(file), s);
         }
     }
 
@@ -158,6 +164,28 @@ pub struct Repo {
     pub base: String,
 }
 
+/// What a lane is in the race for.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    #[default]
+    Racer,
+    /// Reads the racers' work and names the winners in a verdict file.
+    Judge,
+    /// Combines the racers' work in its own worktree; it can win.
+    Merge,
+}
+
+impl Role {
+    pub fn word(self) -> &'static str {
+        match self {
+            Role::Racer => "racer",
+            Role::Judge => "judge",
+            Role::Merge => "merge",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Lane {
     /// Live agent name, also the border label.
@@ -181,6 +209,37 @@ pub struct Lane {
     /// Finishing badge written by the race helper ("🥇 3.6s").
     #[serde(default)]
     pub finish: Option<String>,
+    #[serde(default)]
+    pub role: Role,
+}
+
+/// Where a judge writes its verdict, relative to the directory it runs in.
+pub const VERDICT_FILE: &str = ".derby-verdict.json";
+
+/// What a judge decided: racer names, and why.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Verdict {
+    #[serde(default)]
+    pub winners: Vec<String>,
+    #[serde(default)]
+    pub reason: String,
+}
+
+impl Lane {
+    /// The directory the lane's agent runs in.
+    pub fn dir<'a>(&'a self, rec: &'a Record) -> &'a str {
+        self.worktree.as_deref().unwrap_or(&rec.cwd)
+    }
+
+    pub fn verdict_path(&self, rec: &Record) -> std::path::PathBuf {
+        std::path::Path::new(self.dir(rec)).join(VERDICT_FILE)
+    }
+
+    /// The judge's verdict, once it wrote one that parses.
+    pub fn verdict(&self, rec: &Record) -> Option<Verdict> {
+        let raw = std::fs::read_to_string(self.verdict_path(rec)).ok()?;
+        serde_json::from_str(&raw).ok()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -315,34 +374,65 @@ pub fn plan_lanes(
     let mut lanes = Vec::new();
     for kc in counts {
         for _ in 0..kc.count {
-            let name = unique_name(&lane_base(&kc.kind, kc.model.as_deref()), &taken);
-            taken.push(name.clone());
-            let (branch, worktree) = match (isolation, repo) {
-                (Isolation::Worktree, Some(r)) => {
-                    let b = format!("race/{id}/{name}");
-                    let p = worktree_path(home, &r.name, &b);
-                    (Some(b), Some(p))
-                }
-                _ => (None, None),
-            };
-            let mut args = Vec::new();
-            if let Some(m) = &kc.model {
-                args.extend(["--model".to_string(), m.clone()]);
-            }
-            if let (Some(a), true) = (yolo_args(&kc.kind), kc.yolo) {
-                args.extend(a.iter().map(|s| s.to_string()));
-            }
-            lanes.push(Lane {
-                name,
-                kind: kc.kind.clone(),
-                args,
-                branch,
-                worktree,
-                ..Lane::default()
-            });
+            let lane = plan_lane(kc, &lane_base(&kc.kind, kc.model.as_deref()), id, &taken, repo, isolation, home);
+            taken.push(lane.name.clone());
+            lanes.push(lane);
         }
     }
     lanes
+}
+
+/// A referee lane for race `id`: named after its role, branched from the
+/// race's base like the racers when they have worktrees.
+pub fn plan_referee(
+    role: Role,
+    kc: &KindCount,
+    id: &str,
+    taken: &[String],
+    repo: Option<&Repo>,
+    isolation: Isolation,
+    home: &str,
+) -> Lane {
+    let base = format!("{}-{}", role.word(), lane_base(&kc.kind, kc.model.as_deref()));
+    Lane {
+        role,
+        ..plan_lane(kc, &base, id, taken, repo, isolation, home)
+    }
+}
+
+fn plan_lane(
+    kc: &KindCount,
+    base: &str,
+    id: &str,
+    taken: &[String],
+    repo: Option<&Repo>,
+    isolation: Isolation,
+    home: &str,
+) -> Lane {
+    let name = unique_name(base, taken);
+    let (branch, worktree) = match (isolation, repo) {
+        (Isolation::Worktree, Some(r)) => {
+            let b = format!("race/{id}/{name}");
+            let p = worktree_path(home, &r.name, &b);
+            (Some(b), Some(p))
+        }
+        _ => (None, None),
+    };
+    let mut args = Vec::new();
+    if let Some(m) = &kc.model {
+        args.extend(["--model".to_string(), m.clone()]);
+    }
+    if let (Some(a), true) = (yolo_args(&kc.kind), kc.yolo) {
+        args.extend(a.iter().map(|s| s.to_string()));
+    }
+    Lane {
+        name,
+        kind: kc.kind.clone(),
+        args,
+        branch,
+        worktree,
+        ..Lane::default()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -486,6 +576,32 @@ mod tests {
         assert!(lanes[2].args.is_empty());
         assert_eq!(lanes[3].args, vec!["--model", "kimi-code/k3"]);
         assert_eq!(lane_base("kimi", Some("kimi-code/kimi-for-coding")), "kimi-for-coding");
+    }
+
+    #[test]
+    fn referees_are_named_after_their_role() {
+        let repo = Repo {
+            root: "/src/app".into(),
+            name: "app".into(),
+            base: "abc".into(),
+        };
+        let mut opus = kc("claude", 1);
+        opus.model = Some("opus".into());
+        opus.yolo = true;
+        let taken = vec!["judge-claude-opus-1".to_string()];
+        let l = plan_referee(Role::Judge, &opus, "x", &taken, Some(&repo), Isolation::Worktree, "/h");
+        assert_eq!(l.name, "judge-claude-opus-2");
+        assert_eq!(l.role, Role::Judge);
+        assert_eq!(l.branch.as_deref(), Some("race/x/judge-claude-opus-2"));
+        assert_eq!(l.args, vec!["--model", "opus", "--dangerously-skip-permissions"]);
+        let l = plan_referee(Role::Merge, &kc("codex", 1), "x", &[], None, Isolation::Shared, "/h");
+        assert_eq!((l.name.as_str(), l.branch), ("merge-codex-1", None));
+    }
+
+    #[test]
+    fn old_records_have_racers() {
+        let l: Lane = serde_json::from_str(r#"{"name":"claude-1","kind":"claude"}"#).unwrap();
+        assert_eq!(l.role, Role::Racer);
     }
 
     #[test]

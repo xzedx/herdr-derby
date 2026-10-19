@@ -7,13 +7,19 @@
 //! picked until the user picks, and removal is confirmed on a second screen
 //! that names the uncommitted work it will throw away.
 //!
+//! A referee can help: `J` starts a judge that reads the racers' work and
+//! writes a verdict, which picks the winners here the next time settle
+//! opens (still only proposed: the user confirms as always); `M` starts a
+//! merge lane that combines the racers' work and can then win itself. A
+//! judge is never a winner, so it goes when the race is settled.
+//!
 //! With more than one open race, settle starts at a list of races, where a
 //! race can also be dropped whole. Lanes the user removed by hand are taken
 //! as they are: a lane whose worktree is gone still shows what its branch
 //! committed, and a race with nothing left of any lane counts as settled.
 
 use crate::git::{self, Stat};
-use crate::lanes::{Isolation, Lane, Record};
+use crate::lanes::{Isolation, Lane, Record, Role, Verdict};
 use crate::rpc::Client;
 use crate::start;
 use crate::state;
@@ -80,6 +86,8 @@ pub struct Row {
     pub presence: Presence,
     /// What the lane changed; None for shared-cwd and gone lanes.
     pub stat: Option<Result<Stat, String>>,
+    /// A judge's verdict, once written.
+    pub verdict: Option<Verdict>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,6 +113,8 @@ pub struct SettleApp {
 pub enum Action {
     Diff(usize),
     Focus(usize),
+    /// Start a referee in this role.
+    Referee(Role),
     Settle,
     Back,
     Quit,
@@ -143,9 +153,46 @@ impl SettleApp {
                 status: lane.finish.clone().unwrap_or_else(|| live_status(&agents, lane)),
                 presence,
                 stat: lane_stat(&record, lane, presence.place),
+                verdict: (lane.role == Role::Judge).then(|| lane.verdict(&record)).flatten(),
             })
             .collect();
-        Self::new(record, rows, from_list)
+        let mut app = Self::new(record, rows, from_list);
+        app.follow_verdict();
+        app
+    }
+
+    /// Pick what the latest judge picked, of the racers that are left.
+    /// The user still confirms, and can change the picks first.
+    pub fn follow_verdict(&mut self) {
+        let Some((judge, v)) = (0..self.rows.len())
+            .rev()
+            .find_map(|i| self.rows[i].verdict.as_ref().map(|v| (i, v)))
+        else {
+            return;
+        };
+        let lanes = &self.record.lanes;
+        let picks: Vec<usize> = (0..lanes.len())
+            .filter(|&i| {
+                lanes[i].role != Role::Judge
+                    && self.rows[i].presence.place != Place::Gone
+                    && v.winners.contains(&lanes[i].name)
+            })
+            .collect();
+        let name = &lanes[judge].name;
+        if picks.is_empty() {
+            self.message = Some(format!("{name}'s verdict names no lane that is left"));
+            return;
+        }
+        let names: Vec<&str> = picks.iter().map(|&i| lanes[i].name.as_str()).collect();
+        let reason = v.reason.trim();
+        let mut msg = format!("{name} picks {}", names.join(", "));
+        if !reason.is_empty() {
+            msg.push_str(&format!(": {reason}"));
+        }
+        for i in picks {
+            self.picked[i] = true;
+        }
+        self.message = Some(msg);
     }
 
     pub fn new(record: Record, rows: Vec<Row>, from_list: bool) -> Self {
@@ -177,7 +224,9 @@ impl SettleApp {
     }
 
     fn toggle(&mut self, i: usize) {
-        if self.rows[i].presence.place == Place::Gone {
+        if self.record.lanes[i].role == Role::Judge {
+            self.message = Some(format!("{} judges: it can't win", self.record.lanes[i].name));
+        } else if self.rows[i].presence.place == Place::Gone {
             self.message = Some(format!("{} is gone: nothing to keep", self.record.lanes[i].name));
         } else {
             self.picked[i] = !self.picked[i];
@@ -207,6 +256,9 @@ impl SettleApp {
                 self.screen = Screen::Confirm;
             }
             _ if n == 0 => {}
+            Key::Char('J') => return Some(Action::Referee(Role::Judge)),
+            Key::Char('M') if self.record.worktrees() => return Some(Action::Referee(Role::Merge)),
+            Key::Char('M') => self.message = Some("the racers share the cwd: nothing to merge".into()),
             Key::Up | Key::Char('k') => self.sel = (self.sel + n - 1) % n,
             Key::Down | Key::Char('j') => self.sel = (self.sel + 1) % n,
             Key::Char(' ') | Key::Char('x') => self.toggle(self.sel),
@@ -236,7 +288,14 @@ impl SettleApp {
     }
 }
 
-fn changes(row: &Row) -> (String, &'static str) {
+fn changes(lane: &Lane, row: &Row) -> (String, &'static str) {
+    if lane.role == Role::Judge {
+        return match (&row.verdict, row.presence.place) {
+            (Some(v), _) => (format!("verdict: {}", v.winners.join(", ")), YELLOW),
+            (None, Place::Gone) => ("gone".into(), DIM),
+            (None, _) => ("judge · no verdict yet".into(), DIM),
+        };
+    }
     match (&row.stat, row.presence.place) {
         (_, Place::Shared) => ("shared cwd".into(), DIM),
         (_, Place::Gone) => ("gone".into(), DIM),
@@ -283,6 +342,10 @@ fn header(app: &SettleApp, inner: usize) -> String {
 fn removal(app: &SettleApp, i: usize) -> (String, &'static str) {
     let r = &app.record;
     let row = &app.rows[i];
+    // A judge's only change is its verdict.
+    if r.lanes[i].role == Role::Judge {
+        return (format!("judge · close its {}, remove its worktree and branch", place_word(r)), DIM);
+    }
     if r.isolation == Isolation::Shared || row.stat.is_none() && row.presence.place != Place::Gone {
         return (format!("close its {}", place_word(r)), DIM);
     }
@@ -306,16 +369,16 @@ pub fn render(app: &SettleApp, cols: usize, rows: usize) -> Vec<String> {
         Screen::List => {
             lines.push(format!(
                 " {DIM}{}{RESET}",
-                fit(&format!("    {:<12} {:<16} {:<42} branch", "lane", "finish", "changes"), inner)
+                fit(&format!("    {:<20} {:<16} {:<42} branch", "lane", "finish", "changes"), inner)
             ));
             for (i, (lane, row)) in app.record.lanes.iter().zip(&app.rows).enumerate() {
                 let mark = if app.picked[i] { "[•]" } else { "[ ]" };
-                let (chg, color) = changes(row);
+                let (chg, color) = changes(lane, row);
                 // Columns padded by display width: badges hold wide emoji.
-                let name = pad(&fit(&lane.name, 12), 12);
+                let name = pad(&fit(&lane.name, 20), 20);
                 let status = pad(&fit(&row.status, 16), 16);
                 let chg = pad(&fit(&chg, 42), 42);
-                let branch = fit(lane.branch.as_deref().unwrap_or(""), inner.saturating_sub(77));
+                let branch = fit(lane.branch.as_deref().unwrap_or(""), inner.saturating_sub(85));
                 if i == app.sel {
                     lines.push(format!("{REVERSE} {mark} {name} {status} {chg} {branch}{RESET}"));
                 } else {
@@ -334,14 +397,14 @@ pub fn render(app: &SettleApp, cols: usize, rows: usize) -> Vec<String> {
                     _ => lane.worktree.as_deref().or(lane.branch.as_deref()),
                 }
                 .unwrap_or("its pane");
-                lines.push(format!(" {GREEN}keep{RESET}    {:<12} {}", fit(&lane.name, 12), fit(place, inner.saturating_sub(22))));
+                lines.push(format!(" {GREEN}keep{RESET}    {:<20} {}", fit(&lane.name, 20), fit(place, inner.saturating_sub(30))));
             }
             for i in app.losers() {
                 let (what, color) = removal(app, i);
                 lines.push(format!(
-                    " {RED}remove{RESET}  {:<12} {color}{}{RESET}",
-                    fit(&r.lanes[i].name, 12),
-                    fit(&what, inner.saturating_sub(22))
+                    " {RED}remove{RESET}  {:<20} {color}{}{RESET}",
+                    fit(&r.lanes[i].name, 20),
+                    fit(&what, inner.saturating_sub(30))
                 ));
             }
         }
@@ -355,7 +418,7 @@ pub fn render(app: &SettleApp, cols: usize, rows: usize) -> Vec<String> {
         (Some(m), _) => format!(" {YELLOW}{}{RESET}", fit(m, inner)),
         (None, Screen::List) => format!(
             " {DIM}{}{RESET}",
-            fit(&format!("↑↓ move · space pick winners · d diff · f go to pane · enter review · D drop race · {back}"), inner)
+            fit(&format!("↑↓ move · space pick winners · d diff · f go to pane · J judge · M merge · enter review · D drop race · {back}"), inner)
         ),
         (None, Screen::Confirm) => {
             let verb = if app.dropping { "drop" } else { "settle" };
@@ -384,7 +447,12 @@ pub fn execute(client: &Client, app: &mut SettleApp) -> (String, String) {
     let losers = app.losers();
     let mut errors = Vec::new();
     for &i in &losers {
-        errors.extend(start::remove_lane(client, &app.record, &app.record.lanes[i]));
+        let lane = &app.record.lanes[i];
+        // In a shared cwd the verdict would outlive the judge.
+        if lane.role == Role::Judge {
+            let _ = std::fs::remove_file(lane.verdict_path(&app.record));
+        }
+        errors.extend(start::remove_lane(client, &app.record, lane));
     }
     app.record.settled = true;
     if let Err(e) = app.record.save() {
@@ -596,6 +664,7 @@ mod tests {
                 }
                 _ => None,
             },
+            verdict: None,
         }
     }
 
@@ -712,6 +781,50 @@ mod tests {
         assert!(text.contains("keep codex-1"), "{text}");
         assert!(text.contains("5 files +5 −0 will be discarded"), "{text}");
         assert!(text.contains("2 files +2 −0 will be discarded"), "{text}");
+    }
+
+    #[test]
+    fn a_judge_proposes_winners_but_never_wins() {
+        let mut rec = record(Isolation::Worktree);
+        rec.lanes[2].name = "judge-claude-1".into();
+        rec.lanes[2].role = Role::Judge;
+        let mut rows = vec![
+            row(Place::Worktree, true, 5),
+            row(Place::Worktree, true, 2),
+            row(Place::Worktree, true, 0),
+        ];
+        rows[2].verdict = Some(Verdict {
+            winners: vec!["codex-1".into(), "nobody-1".into()],
+            reason: "smaller and tested".into(),
+        });
+        let mut a = SettleApp::new(rec, rows, false);
+        a.follow_verdict();
+        assert_eq!(a.winners(), vec![1]);
+        assert_eq!(a.message.as_deref(), Some("judge-claude-1 picks codex-1: smaller and tested"));
+        let text = render(&a, 140, 12).join("\n");
+        assert!(text.contains("verdict: codex-1, nobody-1"), "{text}");
+        // Proposed, not settled: the picks can change, the judge can't win.
+        a.handle(Key::Char('3'));
+        assert!(a.message.as_deref().unwrap().contains("can't win"));
+        assert_eq!(a.winners(), vec![1]);
+        // It goes with the losers.
+        assert_eq!(a.losers(), vec![0, 2]);
+        a.handle(Key::Enter);
+        let text = render(&a, 140, 12).join("\n");
+        assert!(text.contains("judge · close its pane"), "{text}");
+        assert_eq!(a.handle(Key::Char('y')), Some(Action::Settle));
+    }
+
+    #[test]
+    fn referee_keys() {
+        let mut a = app(Isolation::Worktree);
+        assert_eq!(a.handle(Key::Char('J')), Some(Action::Referee(Role::Judge)));
+        assert_eq!(a.handle(Key::Char('M')), Some(Action::Referee(Role::Merge)));
+        let rows = (0..3).map(|_| row(Place::Shared, true, 0)).collect();
+        let mut a = SettleApp::new(record(Isolation::Shared), rows, false);
+        assert_eq!(a.handle(Key::Char('M')), None);
+        assert!(a.message.is_some());
+        assert_eq!(a.handle(Key::Char('J')), Some(Action::Referee(Role::Judge)));
     }
 
     #[test]

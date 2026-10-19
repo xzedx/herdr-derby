@@ -101,7 +101,7 @@ Finishing first isn't winning. Settle shows what each lane actually did:
  [•] codex-1      🥇 2m55s         2 files +18 −2       race/1019-143205/codex-1
  [ ] claude-2     ⚠ needs you      no changes           race/1019-143205/claude-2
 ──────────────────────────────────────────────────────────────────
- ↑↓ move · space pick winners · d diff · f go to pane · enter review · D drop race · esc
+ ↑↓ move · space pick winners · d diff · f go to pane · J judge · M merge · enter review · D drop race · esc
 ```
 
 1. Pick one or more winners with Space. `d` shows a lane's diff and `f` jumps
@@ -110,7 +110,26 @@ Finishing first isn't winning. Settle shows what each lane actually did:
 3. `y` confirms. The losers' panes, worktrees and branches are removed; the
    winners stay as they are.
 
-Derby doesn't merge anything; that part is yours. `D` drops the whole race.
+`D` drops the whole race.
+
+#### Referees
+
+A referee is one more agent, started from settle. It doesn't race and has
+no place. Pick its agent, model and yolo the same way as for a race; the
+prompt is written for you, and you can edit it before it goes out.
+
+- **Judge** (`J`): reads every lane's work (`git diff` in its worktree,
+  and its conversation through `herdr agent read`) and writes
+  `.derby-verdict.json` in its own worktree. The next time you open settle,
+  the lanes it names are already picked, with its reason shown. They are
+  only picks: you still review and confirm, and a judge can't win.
+- **Merge** (`M`): gets its own worktree and branch from the race's base,
+  takes the best of the lanes, runs the tests and commits. It shows up as a
+  lane you can keep as the only winner. Needs worktree lanes.
+
+Referees open the same way as the race's lanes (split, tab or workspace),
+and the setup you used last is remembered. Derby itself still merges
+nothing: the merge lane does it on its own branch.
 
 ![Dropping a race: every lane's pane, worktree and branch removed](docs/drop-race.gif)
 
@@ -218,6 +237,7 @@ Settle:
 | --- | --- |
 | Space, x / 1-9 | pick a winner |
 | d / f | diff / go to pane |
+| J / M | start a judge / a merge lane |
 | Enter | review |
 | D | drop the race |
 | y | confirm |

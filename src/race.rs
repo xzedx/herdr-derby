@@ -41,6 +41,9 @@ pub struct Run {
     /// Race-mode record to write the finishing badges into.
     #[serde(default)]
     pub record: Option<String>,
+    /// A referee's run: it finishes, it does not place.
+    #[serde(default)]
+    pub unranked: bool,
 }
 
 /// How a race ended: the notification text, and each target's badge.
@@ -127,7 +130,8 @@ fn badge(slot: &Slot, rank: Option<usize>, now: Duration) -> String {
         }
         None => format!("🏇 {}", fmt_elapsed(slot.own(now))),
         Some((Outcome::Finished, d)) => {
-            let mut b = format!("{} {}", medal(rank.unwrap_or(0)), fmt_elapsed(*d));
+            let mark = rank.map_or_else(|| "✓".to_string(), medal);
+            let mut b = format!("{mark} {}", fmt_elapsed(*d));
             if slot.waited >= Duration::from_secs(1) {
                 b.push_str(&format!(" (+{} waiting)", fmt_elapsed(slot.waited)));
             }
@@ -142,8 +146,8 @@ fn title(slot: &Slot, rank: Option<usize>, now: Duration) -> String {
     format!("{} · {}", badge(slot, rank, now), slot.target.label)
 }
 
-fn publish(client: &Client, slots: &[Slot], now: Duration, ttl: u64) {
-    let r = ranks(slots);
+fn publish(client: &Client, slots: &[Slot], now: Duration, ttl: u64, ranked: bool) {
+    let r = if ranked { ranks(slots) } else { vec![None; slots.len()] };
     for (slot, rank) in slots.iter().zip(r) {
         let _ = client.call(
             "pane.report_metadata",
@@ -352,9 +356,11 @@ pub fn run(run: Run, notify: bool) -> Result<Report, String> {
     loop {
         let snapshot = slots.lock().unwrap().clone();
         if snapshot.iter().all(|s| s.result.is_some()) {
-            publish(&client, &snapshot, start.elapsed(), FINAL_TTL_MS);
+            publish(&client, &snapshot, start.elapsed(), FINAL_TTL_MS, !run.unranked);
             let (head, mut body) = summary(&snapshot);
-            if run.record.is_some() {
+            if run.unranked {
+                body.push_str("\nnext: Derby settle, to see what it did");
+            } else if run.record.is_some() {
                 body.push_str("\nnext: Derby settle, to keep a winner");
             }
             if notify {
@@ -367,7 +373,7 @@ pub fn run(run: Run, notify: bool) -> Result<Report, String> {
             for h in handles {
                 let _ = h.join();
             }
-            let r = ranks(&snapshot);
+            let r = if run.unranked { vec![None; snapshot.len()] } else { ranks(&snapshot) };
             let badges = snapshot
                 .iter()
                 .zip(r)
@@ -375,7 +381,7 @@ pub fn run(run: Run, notify: bool) -> Result<Report, String> {
                 .collect();
             return Ok(Report { head, body, badges });
         }
-        publish(&client, &snapshot, start.elapsed(), LIVE_TTL_MS);
+        publish(&client, &snapshot, start.elapsed(), LIVE_TTL_MS, !run.unranked);
         std::thread::sleep(TICK);
     }
 }
@@ -430,6 +436,8 @@ mod tests {
         assert_eq!(s.own(Duration::from_secs(282)), Duration::from_secs(212));
         s.result = Some((Outcome::Finished, Duration::from_secs(212)));
         assert_eq!(badge(&s, Some(2), Duration::ZERO), "🥈 3m32s (+1m10s waiting)");
+        // A referee finishes without a place.
+        assert_eq!(badge(&s, None, Duration::ZERO), "✓ 3m32s (+1m10s waiting)");
     }
 
     #[test]

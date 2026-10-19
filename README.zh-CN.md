@@ -90,14 +90,23 @@
  [•] codex-1      🥇 2m55s         2 files +18 −2       race/1019-143205/codex-1
  [ ] claude-2     ⚠ needs you      no changes           race/1019-143205/claude-2
 ──────────────────────────────────────────────────────────────────
- ↑↓ move · space pick winners · d diff · f go to pane · enter review · D drop race · esc
+ ↑↓ move · space pick winners · d diff · f go to pane · J judge · M merge · enter review · D drop race · esc
 ```
 
 1. 空格选赢家，可以选多个。`d` 看 diff，`f` 跳到它的 pane 看它说了什么。
 2. 回车预览要删除的东西，没提交的改动会特别标出来。
 3. 按 `y` 确认：落选 lane 的 pane、worktree 和分支一起优化掉，赢家原样保留。
 
-合并不归 Derby 管，资源整合这一步交给你。`D` 是整场放弃：项目砍掉，全员解散，就当无事发生。
+`D` 是整场放弃：项目砍掉，全员解散，就当无事发生。
+
+#### 裁判
+
+裁判是从 settle 里再请来的一个 agent，不参赛，不排名次。agent、模型、yolo 的选法和赛马一样；prompt 已经替你写好，发出去之前可以改。
+
+- **评审**（`J`）：逐个看 lane 的产出（在它的 worktree 里 `git diff`，再用 `herdr agent read` 翻它的对话记录），把结论写进自己 worktree 里的 `.derby-verdict.json`。下次打开 settle，它点名的 lane 已经勾好，理由也摆在下面。它只管提名，拍板的还是你：照样预览、照样按 `y`，评审自己也不能当赢家。
+- **整合**（`M`）：从比赛的 base 拉一个自己的 worktree 和分支，把各 lane 的长处合到一起，跑测试再提交。它会作为一个 lane 出现，可以只留它一个当赢家。前提是各 lane 有自己的 worktree。
+
+裁判的开法跟这场比赛的 lane 一样（分屏、tab 或 workspace），上次的配置会记住。Derby 本身依旧不碰合并，合并是整合 lane 在它自己的分支上做的。
 
 ![整场放弃：每个 lane 的 pane、worktree 和分支都删掉](docs/drop-race.gif)
 
@@ -200,6 +209,7 @@ Ctrl+N / Ctrl+P 在任何地方都等于 ↓ / ↑。
 | --- | --- |
 | Space、x / 1-9 | 选赢家 |
 | d / f | 看 diff / 跳到 pane |
+| J / M | 请评审 / 请整合 |
 | Enter | 预览要删除的 |
 | D | 整场放弃 |
 | y | 确认 |

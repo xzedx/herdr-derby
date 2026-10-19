@@ -3,9 +3,12 @@
 //!
 //! The agent list has two levels: a line per kind, and under a kind with
 //! several models a line per model. A kind with one model shows it inline.
+//!
+//! Settle opens the same popup to start a referee: one agent, a role
+//! instead of isolation and layout, and the prompt written for that role.
 
 use crate::editor::Editor;
-use crate::lanes::{yolo_args, Isolation, KindCount, Layout, RaceConfig, MAX_LANES};
+use crate::lanes::{yolo_args, Isolation, KindCount, Layout, RaceConfig, Role, MAX_LANES};
 use crate::models;
 use crate::start::{Phase, Startup, LANE_TIMEOUT};
 use crate::term::Key;
@@ -26,6 +29,31 @@ pub enum Line {
     Row(usize),
     Isolation,
     Layout,
+    /// Referee setup: judge or merge.
+    Role,
+    /// Referee setup: where it will run.
+    Where,
+}
+
+/// What the popup is starting when it starts a referee.
+#[derive(Clone, Debug)]
+pub struct Referee {
+    pub race: String,
+    pub role: Role,
+    /// The racers have worktrees, so their work can be merged.
+    pub can_merge: bool,
+    /// The prompt each role starts with.
+    pub judge_prompt: String,
+    pub merge_prompt: String,
+}
+
+impl Referee {
+    fn prompt(&self, role: Role) -> &str {
+        match role {
+            Role::Merge => &self.merge_prompt,
+            _ => &self.judge_prompt,
+        }
+    }
 }
 
 /// The model picker over one kind: a filter, the matching models, and the
@@ -79,6 +107,8 @@ pub struct RaceApp {
     pub recent: HashMap<String, Vec<String>>,
     /// Agent lines that fit in the popup.
     pub room: usize,
+    /// Set when the popup starts a referee instead of a race.
+    pub referee: Option<Referee>,
 }
 
 pub enum Outcome {
@@ -115,7 +145,35 @@ impl RaceApp {
             catalog: models::Shared::default(),
             recent: HashMap::new(),
             room: usize::MAX,
+            referee: None,
         }
+    }
+
+    /// The popup for one referee: the first picked row of the last
+    /// referee setup, else the race default's first.
+    pub fn for_referee(kinds: Vec<String>, cfg: &RaceConfig, referee: Referee) -> Self {
+        let mut app = RaceApp::new(kinds, cfg, true);
+        let mut seen = false;
+        for r in app.rows.iter_mut() {
+            r.count = usize::from(r.count > 0 && !seen);
+            seen |= r.count > 0;
+        }
+        app.editor.set(referee.prompt(referee.role));
+        app.referee = Some(referee);
+        app
+    }
+
+    /// Agents the popup may start at once.
+    fn cap(&self) -> usize {
+        if self.referee.is_some() {
+            1
+        } else {
+            MAX_LANES
+        }
+    }
+
+    pub fn role(&self) -> Option<Role> {
+        self.referee.as_ref().map(|r| r.role)
     }
 
     pub fn total(&self) -> usize {
@@ -185,8 +243,13 @@ impl RaceApp {
                 out.extend(rows.into_iter().map(Line::Row));
             }
         }
-        out.push(Line::Isolation);
-        out.push(Line::Layout);
+        if self.referee.is_some() {
+            out.push(Line::Role);
+            out.push(Line::Where);
+        } else {
+            out.push(Line::Isolation);
+            out.push(Line::Layout);
+        }
         out
     }
 
@@ -251,12 +314,40 @@ impl RaceApp {
                     Key::Left | Key::Char('h') => self.layout = self.layout.prev(),
                     _ => {}
                 },
+                Line::Role => match key {
+                    Key::Left | Key::Right | Key::Char(' ') | Key::Char('h') | Key::Char('l') => self.switch_role(),
+                    _ => {}
+                },
+                Line::Where => {}
             },
+        }
+    }
+
+    /// Judge to merge and back. An unedited prompt follows the role; an
+    /// edited one is the user's and stays.
+    fn switch_role(&mut self) {
+        let Some(r) = self.referee.as_mut() else { return };
+        if !r.can_merge {
+            self.message = Some("the racers share the cwd: nothing to merge".into());
+            return;
+        }
+        let to = if r.role == Role::Merge { Role::Judge } else { Role::Merge };
+        let edited = self.editor.text().trim_end() != r.prompt(r.role).trim_end();
+        if !edited {
+            self.editor.set(r.prompt(to));
+        }
+        r.role = to;
+        if edited {
+            self.message = Some("prompt edited: kept as it is".into());
         }
     }
 
     /// One lane for every row that has none, as far as the cap allows.
     fn pick_all(&mut self) {
+        if self.referee.is_some() {
+            self.message = Some("a referee is one agent".into());
+            return;
+        }
         let room = MAX_LANES - self.total();
         let empty = self.rows.iter().filter(|r| r.count == 0).count();
         if empty > room {
@@ -328,6 +419,13 @@ impl RaceApp {
                 } else {
                     self.message = Some(format!("no yolo flag known for {}", row.kind));
                 }
+            }
+            // A referee is one agent: picking a row picks it instead.
+            Key::Right | Key::Char(' ') | Key::Char('+') | Key::Char('=') | Key::Char('l')
+                if self.referee.is_some() =>
+            {
+                self.rows.iter_mut().for_each(|r| r.count = 0);
+                self.rows[i].count = 1;
             }
             Key::Right | Key::Char(' ') | Key::Char('+') | Key::Char('=') | Key::Char('l') => {
                 if total < MAX_LANES {
@@ -497,7 +595,7 @@ impl RaceApp {
                     let mut r = KindCount::new(kind);
                     r.model = m;
                     r.yolo = yolo;
-                    r.count = usize::from(total < MAX_LANES);
+                    r.count = usize::from(total < self.cap());
                     r
                 }
             };
@@ -546,18 +644,16 @@ pub fn render(app: &RaceApp, cols: usize, rows: usize) -> (Vec<String>, Option<(
     let inner = cols.saturating_sub(2);
     let rule = format!("{DIM}{}{RESET}", "─".repeat(cols));
     let n = app.total();
-    lines.push(format!(
-        " {BOLD}Derby{RESET}  {DIM}{}{RESET}",
-        fit(
-            &format!(
-                "race {n} fresh agent{} · {} · {}",
-                plural(n),
-                app.isolation().label(),
-                app.layout.label()
-            ),
-            inner.saturating_sub(7)
-        )
-    ));
+    let what = match &app.referee {
+        Some(r) => format!("{} race {} · {}", r.role.word(), r.race, app.layout.label()),
+        None => format!(
+            "race {n} fresh agent{} · {} · {}",
+            plural(n),
+            app.isolation().label(),
+            app.layout.label()
+        ),
+    };
+    lines.push(format!(" {BOLD}Derby{RESET}  {DIM}{}{RESET}", fit(&what, inner.saturating_sub(7))));
     lines.push(rule.clone());
     let list = app.lines();
     let ed_rows = rows.saturating_sub(chrome_rows(list.len() - 2));
@@ -631,6 +727,23 @@ pub fn render(app: &RaceApp, cols: usize, rows: usize) -> (Vec<String>, Option<(
                 let s = format!(" layout       ‹ {} ›", app.layout.label());
                 (s.clone(), s)
             }
+            Line::Role => {
+                let role = app.role().unwrap_or_default();
+                let what = match role {
+                    Role::Merge => "combine the racers' work, can win",
+                    _ => "read the racers' work, name the winners",
+                };
+                let s = format!(" role         ‹ {} ›  {what}", role.word());
+                (s.clone(), format!(" role         ‹ {} ›  {DIM}{what}{RESET}", role.word()))
+            }
+            Line::Where => {
+                let what = match app.referee.as_ref().is_some_and(|r| r.can_merge) {
+                    true => "its own worktree from the race's base",
+                    false => "the race's cwd",
+                };
+                let s = format!(" runs in      {what}");
+                (s.clone(), format!(" runs in      {DIM}{what}{RESET}"))
+            }
         };
         if config && li == sel {
             lines.push(format!("{REVERSE}{}{RESET}", fit(&plain, inner + 1)));
@@ -642,10 +755,16 @@ pub fn render(app: &RaceApp, cols: usize, rows: usize) -> (Vec<String>, Option<(
 
     let hint = match (&app.message, app.focus) {
         (Some(m), _) => m.clone(),
+        (None, Focus::Prompt) if app.referee.is_some() => {
+            "enter start · alt+enter newline · tab agent & role · esc back".into()
+        }
         (None, Focus::Prompt) => "enter start · alt+enter newline · tab agents & layout · esc cancel".into(),
         (None, Focus::Config) => match &list[sel] {
             Line::Kind(k) if app.kind_rows(k).len() > 1 => {
                 "←→ close/open · m models · y yolo · 0 none · ^a all · ^l none".into()
+            }
+            Line::Kind(_) | Line::Row(_) if app.referee.is_some() => {
+                "→ pick · ← none · m models · y yolo · tab prompt".into()
             }
             Line::Kind(_) => "←→ count · m models · y yolo · ^a all · ^l none · tab prompt".into(),
             Line::Row(_) => "←→ count · m models · d remove · y yolo · ^a all · ^l none".into(),
@@ -1168,6 +1287,75 @@ mod tests {
         );
         assert_eq!(startup_hint(&[Ready, Dropped], false), "enter race 1 · x drop · esc abort");
         assert!(startup_hint(&[Ready], true).starts_with("stopping"));
+    }
+
+    fn referee(can_merge: bool) -> RaceApp {
+        RaceApp::for_referee(
+            vec!["pi".into(), "claude".into(), "codex".into()],
+            &RaceConfig::default(),
+            Referee {
+                race: "x".into(),
+                role: Role::Judge,
+                can_merge,
+                judge_prompt: "judge them".into(),
+                merge_prompt: "merge them".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_referee_is_one_agent() {
+        let mut a = referee(true);
+        // The race default picks claude and codex: only the first stays.
+        assert_eq!(a.picked().iter().map(|r| r.kind.as_str()).collect::<Vec<_>>(), vec!["claude"]);
+        assert_eq!(a.editor.text(), "judge them");
+        a.handle(Key::Tab);
+        a.handle(Key::Down);
+        a.handle(Key::Down); // codex
+        a.handle(Key::Right);
+        assert_eq!(a.picked().iter().map(|r| r.kind.as_str()).collect::<Vec<_>>(), vec!["codex"]);
+        a.handle(Key::Right);
+        assert_eq!(a.total(), 1);
+        a.handle(Key::CtrlA);
+        assert_eq!((a.total(), a.message.as_deref()), (1, Some("a referee is one agent")));
+        a.handle(Key::Left);
+        assert_eq!(a.total(), 0);
+        assert!(a.handle(Key::Enter).is_none());
+        a.handle(Key::Right);
+        assert!(matches!(a.handle(Key::Enter), Some(Outcome::Start)));
+    }
+
+    #[test]
+    fn switching_role_swaps_an_unedited_prompt() {
+        let mut a = referee(true);
+        assert_eq!(a.lines()[3..], [Line::Role, Line::Where]);
+        a.handle(Key::Tab);
+        a.sel = 3;
+        a.handle(Key::Right);
+        assert_eq!((a.role(), a.editor.text()), (Some(Role::Merge), "merge them".to_string()));
+        let text = render(&a, 76, 6 + chrome_rows(3)).0.join("\n");
+        assert!(text.contains("merge race x"), "{text}");
+        assert!(text.contains("‹ merge ›"), "{text}");
+        assert!(text.contains("its own worktree"), "{text}");
+        // Edited: the prompt is the user's now.
+        a.editor.set("merge them carefully");
+        a.handle(Key::Right);
+        assert_eq!((a.role(), a.editor.text()), (Some(Role::Judge), "merge them carefully".to_string()));
+        assert_eq!(a.message.as_deref(), Some("prompt edited: kept as it is"));
+        // Shared racers: there is nothing to merge.
+        let mut a = referee(false);
+        a.handle(Key::Tab);
+        a.sel = 3;
+        a.handle(Key::Right);
+        assert_eq!(a.role(), Some(Role::Judge));
+        assert!(a.message.is_some());
+    }
+
+    #[test]
+    fn referee_frames_fill_the_popup() {
+        let a = referee(true);
+        let rows = 6 + chrome_rows(a.rows.len());
+        assert_eq!(render(&a, 60, rows).0.len(), rows);
     }
 
     #[test]
