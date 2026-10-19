@@ -5,14 +5,14 @@ use crate::model::Target;
 use unicode_width::UnicodeWidthChar;
 
 // Catppuccin Mocha, matching the rest of Zed's Herdr setup.
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[38;2;108;112;134m";
-const GREEN: &str = "\x1b[38;2;166;227;161m";
-const YELLOW: &str = "\x1b[38;2;249;226;175m";
-const RED: &str = "\x1b[38;2;243;139;168m";
-const BLUE: &str = "\x1b[38;2;137;180;250m";
-const REVERSE: &str = "\x1b[7m";
-const RESET: &str = "\x1b[0m";
+pub const BOLD: &str = "\x1b[1m";
+pub const DIM: &str = "\x1b[38;2;108;112;134m";
+pub const GREEN: &str = "\x1b[38;2;166;227;161m";
+pub const YELLOW: &str = "\x1b[38;2;249;226;175m";
+pub const RED: &str = "\x1b[38;2;243;139;168m";
+pub const BLUE: &str = "\x1b[38;2;137;180;250m";
+pub const REVERSE: &str = "\x1b[7m";
+pub const RESET: &str = "\x1b[0m";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
@@ -64,6 +64,42 @@ fn status_color(status: &str) -> &'static str {
     }
 }
 
+/// Append the prompt editor's `ed_rows` rows, scrolled so the cursor row
+/// stays visible. Returns where the terminal cursor goes when focused.
+pub fn editor_block(
+    lines: &mut Vec<String>,
+    editor: &Editor,
+    ed_rows: usize,
+    cols: usize,
+    focused: bool,
+) -> Option<(usize, usize)> {
+    let ed_rows = ed_rows.max(1);
+    let ed_cols = cols.saturating_sub(3);
+    let (text_rows, (cur_row, cur_col)) = editor.layout(ed_cols);
+    let top = cur_row.saturating_sub(ed_rows - 1);
+    let first_line = lines.len();
+    for i in 0..ed_rows {
+        let prefix = if i == 0 && top == 0 {
+            format!("{BLUE}›{RESET} ")
+        } else {
+            "  ".to_string()
+        };
+        let body = match text_rows.get(top + i) {
+            Some(r) => r.clone(),
+            None => String::new(),
+        };
+        if i == 0 && editor.text().is_empty() {
+            lines.push(format!(
+                " {prefix}{DIM}{}{RESET}",
+                fit("type a prompt · ↑ recalls the last one", ed_cols)
+            ));
+        } else {
+            lines.push(format!(" {prefix}{body}"));
+        }
+    }
+    focused.then_some((first_line + cur_row - top, 3 + cur_col))
+}
+
 /// The whole frame, plus where the terminal cursor goes (prompt focus only).
 pub fn render(app: &App, cols: usize, rows: usize) -> (Vec<String>, Option<(usize, usize)>) {
     let mut lines = Vec::new();
@@ -81,33 +117,8 @@ pub fn render(app: &App, cols: usize, rows: usize) -> (Vec<String>, Option<(usiz
     ));
     lines.push(rule.clone());
 
-    // Prompt editor, scrolled so the cursor row stays visible.
     let ed_rows = rows.saturating_sub(chrome_rows(n)).max(1);
-    let ed_cols = cols.saturating_sub(3);
-    let (text_rows, (cur_row, cur_col)) = app.editor.layout(ed_cols);
-    let top = cur_row.saturating_sub(ed_rows - 1);
-    let first_line = lines.len();
-    for i in 0..ed_rows {
-        let prefix = if i == 0 && top == 0 {
-            format!("{BLUE}›{RESET} ")
-        } else {
-            "  ".to_string()
-        };
-        let body = match text_rows.get(top + i) {
-            Some(r) => r.clone(),
-            None => String::new(),
-        };
-        if i == 0 && app.editor.text().is_empty() {
-            lines.push(format!(
-                " {prefix}{DIM}{}{RESET}",
-                fit("type a prompt · ↑ recalls the last one", ed_cols)
-            ));
-        } else {
-            lines.push(format!(" {prefix}{body}"));
-        }
-    }
-    let cursor = (app.focus == Focus::Prompt)
-        .then_some((first_line + cur_row - top, 3 + cur_col));
+    let cursor = editor_block(&mut lines, &app.editor, ed_rows, cols, app.focus == Focus::Prompt);
     lines.push(rule.clone());
 
     if app.targets.is_empty() {

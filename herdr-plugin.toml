@@ -22,3 +22,33 @@ placement = "popup"
 width = 76
 height = 16
 command = ["./target/release/herdr-derby"]
+
+# Race mode: start fresh agents, each in its own lane, and race them.
+[[actions]]
+id = "race"
+title = "Derby: race fresh agents on one prompt"
+contexts = ["workspace", "global"]
+command = ["./target/release/herdr-derby", "--open-race"]
+
+# Keep the winning lane of the latest race, remove the others.
+[[actions]]
+id = "settle"
+title = "Derby: settle the latest race"
+contexts = ["workspace", "global"]
+command = ["./target/release/herdr-derby", "--open-settle"]
+
+[[panes]]
+id = "race"
+title = "Derby race"
+placement = "popup"
+width = 76
+height = 22
+command = ["./target/release/herdr-derby", "--race-popup"]
+
+[[panes]]
+id = "settle"
+title = "Derby settle"
+placement = "popup"
+width = "90%"
+height = "80%"
+command = ["./target/release/herdr-derby", "--settle-popup"]

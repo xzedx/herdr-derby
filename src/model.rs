@@ -71,6 +71,75 @@ pub fn load_targets(client: &Client, tab: &str) -> Result<Vec<Target>, String> {
         .collect())
 }
 
+#[derive(Deserialize, Clone, Debug)]
+pub struct Integration {
+    pub target: String,
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub state: String,
+}
+
+/// Kinds race mode can start: integrations that are installed (Herdr can
+/// tell their state) and whose executable is on PATH.
+pub fn startable(list: Vec<Integration>) -> Vec<String> {
+    list.into_iter()
+        .filter(|i| i.available && i.state != "not_installed")
+        .map(|i| i.target)
+        .collect()
+}
+
+pub fn agent_kinds(client: &Client) -> Result<Vec<String>, String> {
+    let r = client.call("integration.list", json!({}))?;
+    let list = serde_json::from_value(r.get("integrations").cloned().unwrap_or_default())
+        .map_err(|e| format!("integration.list: {e}"))?;
+    Ok(startable(list))
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct Pane {
+    pub pane_id: String,
+    #[serde(default)]
+    pub tab_id: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub foreground_cwd: Option<String>,
+    #[serde(default)]
+    pub focused: bool,
+}
+
+impl Pane {
+    /// Where the work happens: the agent's or command's cwd over the shell's.
+    pub fn dir(&self) -> Option<&str> {
+        self.foreground_cwd.as_deref().or(self.cwd.as_deref())
+    }
+}
+
+/// The workspace part of a tab id: "w1:t2" -> "w1".
+pub fn workspace_of(tab: &str) -> &str {
+    tab.split(':').next().unwrap_or(tab)
+}
+
+/// The pane a race starts from in `tab`: `preferred` when it is there,
+/// else the focused one, else the first.
+pub fn anchor_pane(client: &Client, tab: &str, preferred: Option<&str>) -> Result<Pane, String> {
+    let r = client.call("pane.list", json!({ "workspace_id": workspace_of(tab) }))?;
+    let panes: Vec<Pane> = serde_json::from_value(r.get("panes").cloned().unwrap_or_default())
+        .map_err(|e| format!("pane.list: {e}"))?;
+    let in_tab: Vec<Pane> = panes
+        .into_iter()
+        .filter(|p| p.tab_id.as_deref() == Some(tab))
+        .collect();
+    in_tab
+        .iter()
+        .find(|p| Some(p.pane_id.as_str()) == preferred)
+        .or_else(|| in_tab.iter().find(|p| p.focused))
+        .or_else(|| in_tab.first())
+        .cloned()
+        .ok_or_else(|| format!("no panes in {tab}"))
+}
+
 /// Merge a fresh listing into the current one: keep the user's checks,
 /// pick up status changes, add and drop agents as they come and go. An
 /// agent that became blocked is unchecked, it would be refused anyway.
@@ -108,6 +177,19 @@ mod tests {
         assert!(!t("p1", "working").checked);
         assert!(!t("p1", "blocked").checked);
         assert!(!t("p1", "unknown").checked);
+    }
+
+    #[test]
+    fn startable_kinds() {
+        let list: Vec<Integration> = serde_json::from_value(json!([
+            {"target": "claude", "available": true, "state": "current"},
+            {"target": "copilot", "available": false, "state": "not_installed"},
+            {"target": "kimi", "available": true, "state": "outdated"},
+            {"target": "qwen", "available": true, "state": "not_installed"},
+        ]))
+        .unwrap();
+        assert_eq!(startable(list), vec!["claude", "kimi"]);
+        assert_eq!(workspace_of("w6:t1"), "w6");
     }
 
     #[test]

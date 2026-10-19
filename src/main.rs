@@ -6,9 +6,17 @@
 //! which submits the prompt to all of them at once, shows a live timer on
 //! each pane border, then the finishing rank, and notifies when all are done.
 //!
+//! Race mode starts fresh agents instead, each in its own pane, tab or
+//! workspace and optionally its own git worktree, then races them the same
+//! way. Settle keeps the lane the user picks and removes the rest.
+//!
 //! Usage:
 //!   herdr-derby                  broadcast popup (manifest pane "broadcast")
 //!   herdr-derby --open           open the popup on the current tab, sized to fit
+//!   herdr-derby --race-popup     race popup (manifest pane "race")
+//!   herdr-derby --open-race      open the race popup on the current tab
+//!   herdr-derby --settle-popup   settle popup (manifest pane "settle")
+//!   herdr-derby --open-settle    open the settle popup for the latest race
 //!   herdr-derby --race <file>    run a race described by a run file (detached helper)
 //!   herdr-derby --send [--tab T] <text>
 //!                                race without the popup, in the foreground
@@ -18,11 +26,17 @@
 //! then the plugin action context, then HERDR_TAB_ID.
 
 mod editor;
+mod git;
+mod lanes;
 mod model;
 mod race;
+mod race_ui;
 mod rpc;
+mod settle;
+mod start;
 mod state;
 mod term;
+mod trust;
 mod ui;
 
 use model::{load_targets, refresh, Target};
@@ -130,7 +144,19 @@ fn race_from_file(path: &str) -> Result<(), String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let _ = std::fs::remove_file(path);
     let run: Run = serde_json::from_str(&raw).map_err(|e| format!("{path}: {e}"))?;
-    race::run(run, true).map(|_| ())
+    let record = run.record.clone();
+    let panes: Vec<String> = run.targets.iter().map(|t| t.pane_id.clone()).collect();
+    let report = race::run(run, true)?;
+    // Race mode: settle shows the badges next to each lane's changes.
+    if let Some(mut rec) = record.as_deref().and_then(lanes::Record::load) {
+        for (pane, badge) in panes.iter().zip(report.badges) {
+            if let Some(l) = rec.lanes.iter_mut().find(|l| l.pane_id.as_ref() == Some(pane)) {
+                l.finish = Some(badge);
+            }
+        }
+        rec.save()?;
+    }
+    Ok(())
 }
 
 /// No popup: race the tab's ready agents and print the result.
@@ -150,14 +176,15 @@ fn send(args: &[String]) -> Result<(), String> {
     if chosen.is_empty() {
         return Err(format!("no idle agents in {tab}"));
     }
-    let (head, body) = race::run(
+    let report = race::run(
         Run {
             text,
             targets: run_targets(&chosen),
+            record: None,
         },
         false,
     )?;
-    println!("{head}\n{body}");
+    println!("{}\n{}", report.head, report.body);
     Ok(())
 }
 
@@ -188,13 +215,13 @@ fn handle(app: &mut App, key: Key) -> Option<Outcome> {
             };
         }
         k if app.focus == Focus::Targets => targets_key(app, k),
-        k => prompt_key(app, k),
+        k => prompt_key(&mut app.editor, k),
     }
     None
 }
 
-fn prompt_key(app: &mut App, key: Key) {
-    let ed = &mut app.editor;
+/// Editing keys shared by the broadcast and race prompts.
+pub fn prompt_key(ed: &mut editor::Editor, key: Key) {
     match key {
         Key::Char(c) => ed.insert(c),
         Key::Paste(s) => ed.insert_str(&s),
@@ -308,9 +335,301 @@ fn run_popup(args: &[String]) -> Result<(), String> {
         spawn_race(&Run {
             text,
             targets: run_targets(&app.checked()),
+            record: None,
         })?;
         trace("popup:sent");
     }
+    Ok(())
+}
+
+fn context_str(key: &str) -> Option<String> {
+    env_nonempty("HERDR_PLUGIN_CONTEXT_JSON")
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| v.get(key).and_then(Value::as_str).map(String::from))
+}
+
+/// Action half of race mode: open the race popup on the current tab,
+/// remembering the pane it was opened from (split lanes go next to it).
+fn open_race(args: &[String]) -> Result<(), String> {
+    let client = Client::connect()?;
+    let tab = current_tab(args)?;
+    let anchor = model::anchor_pane(&client, &tab, context_str("pane_id").as_deref())?;
+    let kinds = model::agent_kinds(&client)?.len();
+    let height = (EDITOR_ROWS + race_ui::chrome_rows(kinds) + 2).min(40);
+    client
+        .call(
+            "plugin.pane.open",
+            json!({
+                "plugin_id": plugin_id(),
+                "entrypoint": "race",
+                "placement": "popup",
+                "width": POPUP_WIDTH,
+                "height": height,
+                "env": { "DERBY_TAB": tab, "DERBY_PANE": anchor.pane_id },
+            }),
+        )
+        .map(|_| ())
+}
+
+fn run_race_popup(args: &[String]) -> Result<(), String> {
+    trace("race-popup:start");
+    let client = Client::connect()?;
+    let tab = current_tab(args)?;
+    let anchor = model::anchor_pane(&client, &tab, env_nonempty("DERBY_PANE").as_deref())?;
+    let cwd = anchor.dir().ok_or("the pane has no cwd")?.to_string();
+    let repo = git::repo(&cwd);
+    let mut app = race_ui::RaceApp::new(
+        model::agent_kinds(&client)?,
+        &lanes::RaceConfig::load(),
+        repo.is_some(),
+    );
+    if let Some(t) = env_nonempty("DERBY_TEST_TEXT") {
+        app.editor.set(&t);
+    }
+    term::install_signal_handlers();
+    let raw = term::RawMode::enable();
+    term::enter_screen();
+    let mut input = term::Stdin::new(&std::env::var("DERBY_TEST_INPUT").unwrap_or_default());
+    let outcome = loop {
+        let (cols, rows) = term::size();
+        let (lines, cursor) = race_ui::render(&app, cols, rows);
+        term::draw(&lines, cursor);
+        if term::INTERRUPTED.load(Ordering::SeqCst) {
+            break race_ui::Outcome::Cancel;
+        }
+        if let Some(key) = term::read_key(&mut input, REFRESH_MS) {
+            trace(&format!("race-popup:key:{key:?}"));
+            if let Some(o) = app.handle(key) {
+                break o;
+            }
+        }
+    };
+    let result = match outcome {
+        race_ui::Outcome::Cancel => Ok(()),
+        race_ui::Outcome::Start => {
+            let text = app.editor.text().trim_end().to_string();
+            state::save_last_prompt(&text);
+            app.config().save();
+            let taken: Vec<String> = model::list_agents(&client)?
+                .into_iter()
+                .filter_map(|a| a.name)
+                .collect();
+            let id = lanes::run_id();
+            let home = std::env::var("HOME").unwrap_or_default();
+            let isolation = app.isolation();
+            let record = lanes::Record {
+                lanes: lanes::plan_lanes(&app.picked(), &id, &taken, repo.as_ref(), isolation, &home),
+                id,
+                created: state::now_secs(),
+                cwd,
+                workspace_id: model::workspace_of(&tab).to_string(),
+                repo,
+                isolation,
+                layout: app.layout,
+                settled: false,
+            };
+            start_lanes(&client, record, anchor.pane_id, text, &mut input)
+        }
+    };
+    term::leave_screen();
+    drop(raw);
+    result
+}
+
+/// Bring the lanes up with the popup showing progress, let the user decide
+/// on trust dialogs and drop lanes one by one, then hand the ready lanes to
+/// the race helper. Lanes that do not race are removed. Leaving (Esc, or the
+/// popup closing) removes every lane created so far.
+fn start_lanes(
+    client: &Client,
+    record: lanes::Record,
+    anchor: String,
+    text: String,
+    input: &mut term::Stdin,
+) -> Result<(), String> {
+    use race_ui::Action;
+    use start::Phase;
+    use std::sync::{Arc, Mutex};
+    let n = record.lanes.len();
+    let shared = Arc::new(Mutex::new(start::Startup {
+        record,
+        anchor,
+        phases: vec![Phase::Queued; n],
+        aborted: false,
+    }));
+    start::launch(client.clone(), Arc::clone(&shared));
+    let mut aborting = false;
+    let mut sel = 0;
+    loop {
+        let phases = {
+            let s = shared.lock().unwrap();
+            let (cols, rows) = term::size();
+            term::draw(&race_ui::render_startup(&s, &text, sel, aborting, cols, rows), None);
+            s.phases.clone()
+        };
+        // Lanes still being created are waited for, so none is left behind.
+        if aborting && !phases.iter().any(Phase::creating) {
+            let errors = start::drop_lanes(client, &shared, |_, _| true);
+            trace(&format!("race-popup:aborted errors={errors:?}"));
+            leftovers(client, &errors);
+            return Ok(());
+        }
+        if !aborting && race_ui::all_ready(&phases) {
+            break;
+        }
+        if term::INTERRUPTED.load(Ordering::SeqCst) {
+            aborting = true;
+            shared.lock().unwrap().aborted = true;
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            continue;
+        }
+        let Some(key) = term::read_key(input, 200) else {
+            continue;
+        };
+        if key == Key::Eof {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        match race_ui::startup_action(&phases, &key) {
+            Action::TrustAll => start::trust_all(client, &shared),
+            Action::DropTrust => {
+                let errors = start::drop_lanes(client, &shared, |_, p| *p == Phase::Trust);
+                leftovers(client, &errors);
+            }
+            Action::Recheck => start::recheck(client, &shared),
+            Action::Up => sel = (sel + n - 1) % n,
+            Action::Down => sel = (sel + 1) % n,
+            Action::DropOne if race_ui::droppable(&phases[sel]) => {
+                let errors = start::drop_lanes(client, &shared, |i, _| i == sel);
+                leftovers(client, &errors);
+            }
+            Action::DropOne => {}
+            Action::Race => break,
+            Action::Abort => {
+                aborting = true;
+                shared.lock().unwrap().aborted = true;
+            }
+            Action::None => {}
+        }
+    }
+    // Lanes that did not make it are removed; the ready ones race.
+    let errors = start::drop_lanes(client, &shared, |_, p| *p != Phase::Ready);
+    leftovers(client, &errors);
+    let mut record = {
+        let s = shared.lock().unwrap();
+        let mut r = s.record.clone();
+        r.lanes = r
+            .lanes
+            .into_iter()
+            .zip(&s.phases)
+            .filter(|(_, p)| **p == Phase::Ready)
+            .map(|(l, _)| l)
+            .collect();
+        r
+    };
+    record.lanes.retain(|l| l.pane_id.is_some());
+    record.save()?;
+    let targets = record
+        .lanes
+        .iter()
+        .map(|l| RunTarget {
+            pane_id: l.pane_id.clone().unwrap_or_default(),
+            label: l.name.clone(),
+        })
+        .collect();
+    spawn_race(&Run {
+        text,
+        targets,
+        record: Some(record.id.clone()),
+    })?;
+    trace("race-popup:raced");
+    Ok(())
+}
+
+/// Say what cleanup could not remove, so nothing is left behind unnoticed.
+fn leftovers(client: &Client, errors: &[String]) {
+    if errors.is_empty() {
+        return;
+    }
+    trace(&format!("race-popup:leftovers {errors:?}"));
+    settle::notify(client, "Derby: some lanes were left behind", &errors.join("\n"));
+}
+
+fn open_settle() -> Result<(), String> {
+    let client = Client::connect()?;
+    if lanes::Record::latest_open().is_none() {
+        settle::notify(&client, "Derby: no race to settle", "start one with Derby race");
+        return Ok(());
+    }
+    client
+        .call(
+            "plugin.pane.open",
+            json!({
+                "plugin_id": plugin_id(),
+                "entrypoint": "settle",
+                "placement": "popup",
+                "width": "90%",
+                "height": "80%",
+            }),
+        )
+        .map(|_| ())
+}
+
+fn run_settle_popup() -> Result<(), String> {
+    use settle::Action;
+    trace("settle:start");
+    let client = Client::connect()?;
+    let record = lanes::Record::latest_open().ok_or("no race to settle")?;
+    let mut app = settle::SettleApp::load(&client, record);
+    term::install_signal_handlers();
+    let mut raw = term::RawMode::enable();
+    term::enter_screen();
+    let mut input = term::Stdin::new(&std::env::var("DERBY_TEST_INPUT").unwrap_or_default());
+    loop {
+        let (cols, rows) = term::size();
+        term::draw(&settle::render(&app, cols, rows), None);
+        if term::INTERRUPTED.load(Ordering::SeqCst) {
+            break;
+        }
+        let Some(key) = term::read_key(&mut input, REFRESH_MS) else {
+            continue;
+        };
+        trace(&format!("settle:key:{key:?}"));
+        match app.handle(key) {
+            None => {}
+            Some(Action::Diff(i)) => {
+                // Hand the terminal to git's pager, then measure again.
+                let lane = &app.record.lanes[i];
+                if let (Some(path), Some(repo)) = (&lane.worktree, &app.record.repo) {
+                    term::leave_screen();
+                    drop(raw.take());
+                    if let Err(e) = git::show_diff(path, &repo.base) {
+                        app.message = Some(e);
+                    }
+                    raw = term::RawMode::enable();
+                    term::enter_screen();
+                    app.rows[i].stat = settle::lane_stat(&app.record, i);
+                }
+            }
+            Some(Action::Focus(i)) => {
+                if let Some(pane) = &app.record.lanes[i].pane_id {
+                    let _ = client.call("pane.focus", json!({ "pane_id": pane }));
+                }
+                break;
+            }
+            Some(Action::Settle) => {
+                let (cols, rows) = term::size();
+                app.message = Some("settling…".into());
+                term::draw(&settle::render(&app, cols, rows), None);
+                let (head, body) = settle::execute(&client, &mut app);
+                trace(&format!("settle:done {head}"));
+                settle::notify(&client, &head, &body);
+                break;
+            }
+            Some(Action::Quit) => break,
+        }
+    }
+    term::leave_screen();
+    drop(raw);
     Ok(())
 }
 
@@ -341,6 +660,14 @@ fn main() {
     let has = |f: &str| args.iter().any(|a| a == f);
     let result = if has("--open") {
         open_popup(&args)
+    } else if has("--open-race") {
+        open_race(&args)
+    } else if has("--race-popup") {
+        run_race_popup(&args)
+    } else if has("--open-settle") {
+        open_settle()
+    } else if has("--settle-popup") {
+        run_settle_popup()
     } else if has("--race") {
         match arg_value(&args, "--race") {
             Some(path) => race_from_file(&path),
