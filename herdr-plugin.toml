@@ -1,6 +1,6 @@
 id = "xzedx.derby"
 name = "Derby"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.1"
 description = "Send one prompt to every coding agent in the current Herdr tab and watch them race: a popup to type in, live timers and finishing ranks on the pane borders."
 platforms = ["linux", "macos"]

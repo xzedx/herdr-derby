@@ -1,6 +1,6 @@
 [package]
 name = "herdr-derby"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Send one prompt to every coding agent in the current Herdr tab and watch them race: a popup to type in, live timers and finishing ranks on the pane borders."
 license = "MIT"
