@@ -224,6 +224,7 @@ fn start_agent(client: &Client, shared: &Shared, i: usize) {
         let params = json!({
             "name": lane.name,
             "kind": lane.kind,
+            "args": lane.args,
             "pane_id": pane,
             "timeout_ms": LANE_TIMEOUT.as_millis() as u64,
         });

@@ -160,7 +160,7 @@ pub fn render(app: &App, cols: usize, rows: usize) -> (Vec<String>, Option<(usiz
         ),
         (None, Focus::Targets) => format!(
             " {DIM}{}{RESET}",
-            fit("space toggle · a all · tab/esc prompt · enter send", inner)
+            fit("space toggle · ^a all · ^l none · tab/esc prompt · enter send", inner)
         ),
     };
     lines.push(hint);

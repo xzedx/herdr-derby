@@ -2,7 +2,7 @@
 //! the startup progress until every lane is ready for the prompt.
 
 use crate::editor::Editor;
-use crate::lanes::{Isolation, KindCount, Layout, RaceConfig, MAX_LANES};
+use crate::lanes::{yolo_args, Isolation, KindCount, Layout, RaceConfig, MAX_LANES};
 use crate::start::{Phase, Startup, LANE_TIMEOUT};
 use crate::term::Key;
 use crate::ui::{editor_block, fit, BOLD, DIM, GREEN, RED, RESET, REVERSE, YELLOW};
@@ -36,13 +36,7 @@ impl RaceApp {
     /// Counts come from the last race; the first race gets one claude and
     /// one codex when they are installed, else the first kind.
     pub fn new(kinds: Vec<String>, cfg: &RaceConfig, git: bool) -> Self {
-        let mut rows: Vec<KindCount> = kinds
-            .into_iter()
-            .map(|kind| KindCount {
-                count: cfg.count(&kind),
-                kind,
-            })
-            .collect();
+        let mut rows: Vec<KindCount> = kinds.iter().map(|kind| cfg.kind(kind)).collect();
         if rows.iter().all(|r| r.count == 0) {
             for r in rows.iter_mut().filter(|r| r.kind == "claude" || r.kind == "codex") {
                 r.count = 1;
@@ -80,7 +74,7 @@ impl RaceApp {
 
     pub fn config(&self) -> RaceConfig {
         RaceConfig {
-            counts: self.kinds.iter().filter(|k| k.count > 0).cloned().collect(),
+            counts: self.kinds.iter().filter(|k| k.count > 0 || k.yolo).cloned().collect(),
             isolation: self.isolation,
             layout: self.layout,
         }
@@ -121,6 +115,8 @@ impl RaceApp {
         let k = self.kinds.len();
         let rows = k + 2;
         match key {
+            Key::CtrlA => self.pick_all(),
+            Key::CtrlL => self.kinds.iter_mut().for_each(|r| r.count = 0),
             Key::Up | Key::Char('k') => self.sel = (self.sel + rows - 1) % rows,
             Key::Down | Key::Char('j') => self.sel = (self.sel + 1) % rows,
             _ if self.sel < k => self.count_key(key),
@@ -139,10 +135,29 @@ impl RaceApp {
         }
     }
 
+    /// One lane for every kind that has none, as far as the cap allows.
+    fn pick_all(&mut self) {
+        let room = MAX_LANES - self.total();
+        let empty = self.kinds.iter().filter(|r| r.count == 0).count();
+        if empty > room {
+            self.message = Some(format!("at most {MAX_LANES} agents per race"));
+        }
+        for r in self.kinds.iter_mut().filter(|r| r.count == 0).take(room) {
+            r.count = 1;
+        }
+    }
+
     fn count_key(&mut self, key: Key) {
         let total = self.total();
         let row = &mut self.kinds[self.sel];
         match key {
+            Key::Char('y') => {
+                if yolo_args(&row.kind).is_some() {
+                    row.yolo = !row.yolo;
+                } else {
+                    self.message = Some(format!("no yolo flag known for {}", row.kind));
+                }
+            }
             Key::Right | Key::Char(' ') | Key::Char('+') | Key::Char('=') | Key::Char('l') => {
                 if total < MAX_LANES {
                     row.count += 1;
@@ -213,10 +228,11 @@ pub fn render(app: &RaceApp, cols: usize, rows: usize) -> (Vec<String>, Option<(
         } else {
             ("·".to_string(), DIM)
         };
+        let yolo = if k.yolo { "yolo" } else { "" };
         row(
             i,
-            format!("   {name:<12} {count}"),
-            format!("   {name:<12} {color}{count}{RESET}"),
+            format!("   {name:<12} {count:<3} {yolo}"),
+            format!("   {name:<12} {color}{count:<3}{RESET} {RED}{yolo}{RESET}"),
         );
     }
     let k = app.kinds.len();
@@ -238,7 +254,7 @@ pub fn render(app: &RaceApp, cols: usize, rows: usize) -> (Vec<String>, Option<(
         ),
         (None, Focus::Config) => format!(
             " {DIM}{}{RESET}",
-            fit("←→ change · ↑↓ move · tab prompt · enter start", inner)
+            fit("←→ count · y yolo · ^a all · ^l none · ↑↓ move · tab prompt", inner)
         ),
     };
     lines.push(hint);
@@ -419,7 +435,7 @@ mod tests {
     #[test]
     fn remembered_counts_win() {
         let cfg = RaceConfig {
-            counts: vec![KindCount { kind: "claude".into(), count: 2 }],
+            counts: vec![KindCount { kind: "claude".into(), count: 2, yolo: true }],
             isolation: Isolation::Shared,
             layout: Layout::Workspace,
         };
@@ -473,6 +489,32 @@ mod tests {
         a.editor.set("go");
         assert!(a.handle(Key::Enter).is_none());
         assert!(a.message.as_deref().unwrap().contains("pick"));
+    }
+
+    #[test]
+    fn yolo_and_select_all() {
+        let mut a = app();
+        a.handle(Key::Tab);
+        a.handle(Key::Char('y')); // pi has no yolo flag
+        assert!(!a.kinds[0].yolo);
+        assert!(a.message.as_deref().unwrap().contains("no yolo"));
+        a.handle(Key::Down);
+        a.handle(Key::Char('y'));
+        assert!(a.kinds[1].yolo);
+        a.handle(Key::CtrlL);
+        assert_eq!(a.total(), 0);
+        // Yolo is remembered even for a kind with no lanes.
+        assert!(a.config().counts.iter().any(|k| k.kind == "claude" && k.yolo));
+        a.kinds[2].count = 3;
+        a.handle(Key::CtrlA);
+        let counts: Vec<usize> = a.kinds.iter().map(|k| k.count).collect();
+        assert_eq!(counts, vec![1, 1, 3]);
+        // The cap still holds.
+        a.handle(Key::CtrlL);
+        a.kinds[2].count = MAX_LANES - 1;
+        a.handle(Key::CtrlA);
+        assert_eq!(a.total(), MAX_LANES);
+        assert!(a.message.is_some());
     }
 
     #[test]

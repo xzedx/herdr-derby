@@ -230,7 +230,7 @@ pub fn prompt_key(ed: &mut editor::Editor, key: Key) {
         Key::Delete => ed.delete(),
         Key::Left => ed.left(),
         Key::Right => ed.right(),
-        Key::Home => ed.home(),
+        Key::Home | Key::CtrlA => ed.home(),
         Key::End => ed.end(),
         Key::CtrlU => ed.clear(),
         Key::Up => {
@@ -275,6 +275,11 @@ fn targets_key(app: &mut App, key: Key) {
             let all = app.targets.iter().filter(|t| t.sendable()).all(|t| t.checked);
             for t in app.targets.iter_mut().filter(|t| t.sendable()) {
                 t.checked = !all;
+            }
+        }
+        Key::CtrlA | Key::CtrlL => {
+            for t in app.targets.iter_mut().filter(|t| t.sendable()) {
+                t.checked = key == Key::CtrlA;
             }
         }
         _ => {}
@@ -773,6 +778,12 @@ mod tests {
         handle(&mut a, Key::Char('3'));
         assert!(a.targets[2].checked);
         handle(&mut a, Key::Char('a')); // all sendable checked -> uncheck all
+        assert!(a.targets.iter().all(|t| !t.checked));
+        handle(&mut a, Key::CtrlA);
+        assert!(a.targets.iter().all(|t| t.checked == t.sendable()));
+        handle(&mut a, Key::CtrlA); // select all again, not a toggle
+        assert!(a.targets[2].checked);
+        handle(&mut a, Key::CtrlL);
         assert!(a.targets.iter().all(|t| !t.checked));
         handle(&mut a, Key::Esc);
         assert_eq!(a.focus, Focus::Prompt);

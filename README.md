@@ -67,16 +67,20 @@ each agent to start, pick isolation and layout, press Enter.
  › Make the importer stream instead of
    loading the whole file.
 ──────────────────────────────────────────────
-   claude       ×2
+   claude       ×2  yolo
    codex        ×1
    kimi         ·
  isolation    ‹ worktree per agent ›
  layout       ‹ split this tab ›
 ──────────────────────────────────────────────
- ←→ change · ↑↓ move · tab prompt · enter start
+ ←→ count · y yolo · ^a all · ^l none · ↑↓ move · tab prompt
 ```
 
 - **Agents**: the Herdr integrations that are installed and on PATH.
+- **yolo**: start that agent without approval prompts: claude
+  `--dangerously-skip-permissions`, codex `--yolo`, kimi `--auto`, omp
+  `--auto-approve`, gemini and qwen `--yolo`, copilot `--allow-all-tools`.
+  Agents without such a flag (pi) start as usual.
 - **Isolation**: one git worktree per agent, on a branch
   `race/<run-id>/<agent>` from the current HEAD, or every agent in the shared
   cwd. Outside a git repo it is always the shared cwd.
@@ -218,6 +222,7 @@ Target list:
 | Space, x | toggle |
 | 1-9 | toggle that agent |
 | a | toggle all |
+| Ctrl+A / Ctrl+L | select all / none |
 | Tab, Esc | back to the prompt |
 | Enter | send |
 
@@ -228,6 +233,8 @@ Race popup, below the prompt:
 | ↑ ↓ / j k | move |
 | → + Space / ← - | one more / one less of that agent; change isolation or layout |
 | 0 | none of that agent |
+| y | yolo on / off for that agent |
+| Ctrl+A / Ctrl+L | one of every agent not picked yet / none at all |
 | Tab, Esc | back to the prompt |
 | Enter | start |
 

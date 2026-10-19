@@ -96,6 +96,10 @@ pub enum Key {
     Esc,
     CtrlC,
     CtrlU,
+    /// Line start in the editor, select all in a list.
+    CtrlA,
+    /// Select none in a list.
+    CtrlL,
     Eof,
     Unknown,
 }
@@ -189,7 +193,8 @@ fn decode<S: ByteSource>(src: &mut S, b: u8) -> Key {
         0x7f | 0x08 => Key::Backspace,
         0x03 => Key::CtrlC,
         0x15 => Key::CtrlU,
-        0x01 => Key::Home,
+        0x01 => Key::CtrlA,
+        0x0c => Key::CtrlL,
         0x05 => Key::End,
         b if b < 0x20 => Key::Unknown,
         b if b < 0x80 => Key::Char(b as char),
@@ -363,6 +368,7 @@ mod tests {
         assert_eq!(keys(b"\x1b[A\x1bOB"), vec![Key::Up, Key::Down]);
         assert_eq!(keys(b"\x1b"), vec![Key::Esc]);
         assert_eq!(keys(b"\x1b[Z"), vec![Key::BackTab]);
+        assert_eq!(keys(b"\x01\x0c"), vec![Key::CtrlA, Key::CtrlL]);
     }
 
     #[test]

@@ -75,6 +75,22 @@ impl Layout {
 pub struct KindCount {
     pub kind: String,
     pub count: usize,
+    /// Start this kind with its skip-the-approvals flag.
+    #[serde(default)]
+    pub yolo: bool,
+}
+
+/// The flags that start `kind` without approval prompts, if it has them.
+pub fn yolo_args(kind: &str) -> Option<&'static [&'static str]> {
+    Some(match kind {
+        "claude" => &["--dangerously-skip-permissions"],
+        "codex" | "gemini" | "qwen" => &["--yolo"],
+        // Its --yolo still asks before risky actions.
+        "kimi" => &["--auto"],
+        "omp" => &["--auto-approve"],
+        "copilot" => &["--allow-all-tools"],
+        _ => return None,
+    })
 }
 
 /// What the race popup remembers between races.
@@ -102,11 +118,13 @@ impl RaceConfig {
         }
     }
 
-    pub fn count(&self, kind: &str) -> usize {
-        self.counts
-            .iter()
-            .find(|c| c.kind == kind)
-            .map_or(0, |c| c.count)
+    /// What was remembered for `kind`: nothing means no lanes, no yolo.
+    pub fn kind(&self, kind: &str) -> KindCount {
+        self.counts.iter().find(|c| c.kind == kind).cloned().unwrap_or(KindCount {
+            kind: kind.into(),
+            count: 0,
+            yolo: false,
+        })
     }
 }
 
@@ -126,6 +144,9 @@ pub struct Lane {
     /// Live agent name, also the border label.
     pub name: String,
     pub kind: String,
+    /// Extra agent arguments, such as the yolo flag.
+    #[serde(default)]
+    pub args: Vec<String>,
     #[serde(default)]
     pub branch: Option<String>,
     #[serde(default)]
@@ -268,9 +289,14 @@ pub fn plan_lanes(
                 }
                 _ => (None, None),
             };
+            let args = match yolo_args(&kc.kind) {
+                Some(a) if kc.yolo => a.iter().map(|s| s.to_string()).collect(),
+                _ => Vec::new(),
+            };
             lanes.push(Lane {
                 name,
                 kind: kc.kind.clone(),
+                args,
                 branch,
                 worktree,
                 ..Lane::default()
@@ -349,6 +375,7 @@ mod tests {
         KindCount {
             kind: kind.into(),
             count,
+            yolo: false,
         }
     }
 
@@ -389,6 +416,18 @@ mod tests {
         let lanes = plan_lanes(&[kc("claude", 1)], "x", &[], None, Isolation::Worktree, "/h");
         assert_eq!(lanes[0].branch, None);
         assert_eq!(lanes[0].worktree, None);
+    }
+
+    #[test]
+    fn yolo_lanes_get_their_flag() {
+        let mut claude = kc("claude", 1);
+        claude.yolo = true;
+        let mut pi = kc("pi", 1);
+        pi.yolo = true; // no known flag: started plain
+        let lanes = plan_lanes(&[claude, kc("codex", 1), pi], "x", &[], None, Isolation::Shared, "/h");
+        assert_eq!(lanes[0].args, vec!["--dangerously-skip-permissions"]);
+        assert!(lanes[1].args.is_empty());
+        assert!(lanes[2].args.is_empty());
     }
 
     #[test]
