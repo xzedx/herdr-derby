@@ -344,10 +344,10 @@ fn removal(app: &SettleApp, i: usize) -> (String, &'static str) {
     let row = &app.rows[i];
     // A judge's only change is its verdict.
     if r.lanes[i].role == Role::Judge {
-        return (format!("judge · close its {}, remove its worktree and branch", place_word(r)), DIM);
+        return (format!("judge · close its {}, remove its worktree and branch", place_word(r, &r.lanes[i])), DIM);
     }
     if r.isolation == Isolation::Shared || row.stat.is_none() && row.presence.place != Place::Gone {
-        return (format!("close its {}", place_word(r)), DIM);
+        return (format!("close its {}", place_word(r, &r.lanes[i])), DIM);
     }
     match (&row.stat, row.presence.place) {
         (Some(Ok(s)), Place::Branch) if s.files > 0 => {
@@ -355,7 +355,7 @@ fn removal(app: &SettleApp, i: usize) -> (String, &'static str) {
         }
         (Some(Ok(s)), _) if s.files > 0 => (format!("{} will be discarded", s.describe()), RED),
         (_, Place::Branch) => ("worktree already gone · branch removed".into(), DIM),
-        (_, Place::Gone) => (format!("worktree and branch already gone · close its {}", place_word(r)), DIM),
+        (_, Place::Gone) => (format!("worktree and branch already gone · close its {}", place_word(r, &r.lanes[i])), DIM),
         (Some(Ok(_)), _) => ("no changes · worktree and branch removed".into(), DIM),
         _ => ("worktree and branch removed".into(), DIM),
     }
@@ -434,8 +434,8 @@ fn pad(s: &str, w: usize) -> String {
     format!("{s}{}", " ".repeat(w.saturating_sub(used)))
 }
 
-fn place_word(r: &Record) -> &'static str {
-    match r.layout {
+fn place_word(r: &Record, lane: &Lane) -> &'static str {
+    match lane.layout(r) {
         crate::lanes::Layout::Split => "pane",
         crate::lanes::Layout::Tab => "tab",
         crate::lanes::Layout::Workspace => "workspace",
@@ -675,6 +675,14 @@ mod tests {
             row(Place::Worktree, true, 2),
         ];
         SettleApp::new(record(isolation), rows, false)
+    }
+
+    #[test]
+    fn a_referee_placed_unlike_the_race_closes_its_own_place() {
+        let mut a = app(Isolation::Shared);
+        assert_eq!(removal(&a, 2).0, "close its pane");
+        a.record.lanes[2].layout = Some(Layout::Tab);
+        assert_eq!(removal(&a, 2).0, "close its tab");
     }
 
     #[test]

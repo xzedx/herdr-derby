@@ -60,6 +60,15 @@ impl Layout {
         }
     }
 
+    /// The label for a single lane, such as a referee.
+    pub fn one_label(self) -> &'static str {
+        match self {
+            Layout::Split => "split this tab",
+            Layout::Tab => "its own tab",
+            Layout::Workspace => "its own workspace",
+        }
+    }
+
     pub fn next(self) -> Self {
         match self {
             Layout::Split => Layout::Tab,
@@ -211,6 +220,9 @@ pub struct Lane {
     pub finish: Option<String>,
     #[serde(default)]
     pub role: Role,
+    /// Set when the lane was placed unlike the race, as a referee may be.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Layout>,
 }
 
 /// Where a judge writes its verdict, relative to the directory it runs in.
@@ -226,6 +238,11 @@ pub struct Verdict {
 }
 
 impl Lane {
+    /// How the lane was placed: its own layout, else the race's.
+    pub fn layout(&self, rec: &Record) -> Layout {
+        self.layout.unwrap_or(rec.layout)
+    }
+
     /// The directory the lane's agent runs in.
     pub fn dir<'a>(&'a self, rec: &'a Record) -> &'a str {
         self.worktree.as_deref().unwrap_or(&rec.cwd)

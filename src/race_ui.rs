@@ -5,7 +5,8 @@
 //! several models a line per model. A kind with one model shows it inline.
 //!
 //! Settle opens the same popup to start a referee: one agent, a role
-//! instead of isolation and layout, and the prompt written for that role.
+//! instead of isolation, where it lands, and the prompt written for that
+//! role.
 
 use crate::editor::Editor;
 use crate::lanes::{yolo_args, Isolation, KindCount, Layout, RaceConfig, Role, MAX_LANES};
@@ -246,6 +247,7 @@ impl RaceApp {
         if self.referee.is_some() {
             out.push(Line::Role);
             out.push(Line::Where);
+            out.push(Line::Layout);
         } else {
             out.push(Line::Isolation);
             out.push(Line::Layout);
@@ -645,7 +647,7 @@ pub fn render(app: &RaceApp, cols: usize, rows: usize) -> (Vec<String>, Option<(
     let rule = format!("{DIM}{}{RESET}", "─".repeat(cols));
     let n = app.total();
     let what = match &app.referee {
-        Some(r) => format!("{} race {} · {}", r.role.word(), r.race, app.layout.label()),
+        Some(r) => format!("{} race {} · {}", r.role.word(), r.race, app.layout.one_label()),
         None => format!(
             "race {n} fresh agent{} · {} · {}",
             plural(n),
@@ -724,7 +726,11 @@ pub fn render(app: &RaceApp, cols: usize, rows: usize) -> (Vec<String>, Option<(
                 (s.clone(), s)
             }
             Line::Layout => {
-                let s = format!(" layout       ‹ {} ›", app.layout.label());
+                let label = match app.referee {
+                    Some(_) => app.layout.one_label(),
+                    None => app.layout.label(),
+                };
+                let s = format!(" layout       ‹ {label} ›");
                 (s.clone(), s)
             }
             Line::Role => {
@@ -756,7 +762,7 @@ pub fn render(app: &RaceApp, cols: usize, rows: usize) -> (Vec<String>, Option<(
     let hint = match (&app.message, app.focus) {
         (Some(m), _) => m.clone(),
         (None, Focus::Prompt) if app.referee.is_some() => {
-            "enter start · alt+enter newline · tab agent & role · esc back".into()
+            "enter start · alt+enter newline · tab agent, role & layout · esc back".into()
         }
         (None, Focus::Prompt) => "enter start · alt+enter newline · tab agents & layout · esc cancel".into(),
         (None, Focus::Config) => match &list[sel] {
@@ -1328,7 +1334,7 @@ mod tests {
     #[test]
     fn switching_role_swaps_an_unedited_prompt() {
         let mut a = referee(true);
-        assert_eq!(a.lines()[3..], [Line::Role, Line::Where]);
+        assert_eq!(a.lines()[3..], [Line::Role, Line::Where, Line::Layout]);
         a.handle(Key::Tab);
         a.sel = 3;
         a.handle(Key::Right);
@@ -1349,6 +1355,21 @@ mod tests {
         a.handle(Key::Right);
         assert_eq!(a.role(), Some(Role::Judge));
         assert!(a.message.is_some());
+    }
+
+    #[test]
+    fn a_referee_picks_where_it_lands() {
+        let mut a = referee(true);
+        a.layout = Layout::Split;
+        a.handle(Key::Tab);
+        a.sel = 5;
+        a.handle(Key::Right);
+        assert_eq!(a.layout, Layout::Tab);
+        let text = render(&a, 76, 6 + chrome_rows(3)).0.join("\n");
+        assert!(text.contains("‹ its own tab ›"), "{text}");
+        a.handle(Key::Left);
+        a.handle(Key::Left);
+        assert_eq!(a.layout, Layout::Workspace);
     }
 
     #[test]

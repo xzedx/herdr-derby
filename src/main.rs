@@ -630,13 +630,6 @@ fn start_referee(
     if racers.is_empty() {
         return Err("no lane left to referee".into());
     }
-    let anchor = match rec.layout {
-        lanes::Layout::Split => {
-            let tab = current_tab(&[])?;
-            model::anchor_pane(client, &tab, env_nonempty("DERBY_PANE").as_deref())?.pane_id
-        }
-        _ => String::new(),
-    };
     let kinds = model::agent_kinds(client)?;
     let mut ui = race_ui::RaceApp::for_referee(
         kinds.clone(),
@@ -649,6 +642,7 @@ fn start_referee(
             merge_prompt: referee::prompt(lanes::Role::Merge, rec, &racers),
         },
     );
+    // Lands like the racers unless picked otherwise.
     ui.layout = rec.layout;
     ui.catalog = models::load(&kinds);
     ui.recent = models::load_recent();
@@ -665,9 +659,18 @@ fn start_referee(
     taken.extend(rec.lanes.iter().map(|l| l.name.clone()));
     let home = std::env::var("HOME").unwrap_or_default();
     let lane = lanes::plan_referee(role, &kc, &rec.id, &taken, rec.repo.as_ref(), rec.isolation, &home);
+    let lane = lanes::Lane { layout: Some(ui.layout), ..lane };
     // A shared cwd may hold an earlier judge's verdict.
     let _ = std::fs::remove_file(lane.verdict_path(rec));
+    let anchor = match ui.layout {
+        lanes::Layout::Split => {
+            let tab = current_tab(&[])?;
+            model::anchor_pane(client, &tab, env_nonempty("DERBY_PANE").as_deref())?.pane_id
+        }
+        _ => String::new(),
+    };
     let mut alone = rec.clone();
+    alone.layout = ui.layout;
     alone.lanes = vec![lane];
     let Some(started) = start_lanes(client, alone, anchor, &text, input)? else {
         return Ok(false);

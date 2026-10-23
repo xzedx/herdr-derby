@@ -518,7 +518,7 @@ pub fn remove_lane(client: &Client, rec: &Record, lane: &Lane) -> Vec<String> {
             errors.push(format!("{}: {what}: {e}", lane.name));
         }
     };
-    match rec.layout {
+    match lane.layout(rec) {
         Layout::Workspace => {
             if let Some(ws) = &lane.workspace_id {
                 note("close workspace", ignore_gone(client.call("workspace.close", json!({ "workspace_id": ws }))));
